@@ -383,7 +383,11 @@ file_allocate_range(PMEMfilepool *pfp, struct pmemfile_vinode *vinode,
 
 			block->next = blockp_as_oid(vinode->first_block);
 			block->prev = TOID_NULL(struct pmemfile_block);
-			TX_ADD_FIELD_DIRECT(vinode->first_block, prev);
+
+			/*
+			 * The following modification 16 bytes seems to
+			 * be ignored by pmemcheck:
+			 */
 			vinode->first_block->prev = blockp_as_oid(block);
 
 			vinode->first_block = block;
