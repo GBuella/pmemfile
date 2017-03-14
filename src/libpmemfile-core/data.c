@@ -1017,3 +1017,64 @@ vinode_restore_on_abort(struct pmemfile_vinode *vinode)
 		vinode->blocks = NULL;
 	}
 }
+
+static int
+_pmemfile_ftruncate(PMEMfilepool *pfp, struct pmemfile_vinode *vinode,
+			uint64_t length)
+{
+	if (!vinode_is_regular_file(vinode)) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	int error = 0;
+
+	os_rwlock_wrlock(&vinode->rwlock);
+
+	vinode_snapshot(vinode);
+
+	TX_BEGIN_CB(pfp->pop, cb_queue, pfp) {
+		vinode_truncate(pfp, vinode, length);
+	} TX_ONABORT {
+		error = errno;
+		vinode_restore_on_abort(vinode);
+	} TX_END
+
+	os_rwlock_unlock(&vinode->rwlock);
+
+	if (error) {
+		errno = error;
+		return -1;
+	}
+
+	return 0;
+}
+
+int
+pmemfile_ftruncate(PMEMfilepool *pfp, PMEMfile *file, off_t length)
+{
+	int ret;
+
+	if (length < 0) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	if (length > SSIZE_MAX) {
+		errno = EFBIG;
+		return -1;
+	}
+
+	os_mutex_lock(&file->mutex);
+
+	if (file->flags & PFILE_WRITE) {
+		ret = _pmemfile_ftruncate(pfp, file->vinode, (uint64_t)length);
+	} else {
+		errno = EBADF;
+		ret = -1;
+	}
+
+	os_mutex_unlock(&file->mutex);
+
+	return ret;
+}
