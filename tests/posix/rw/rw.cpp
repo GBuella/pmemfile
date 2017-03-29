@@ -780,6 +780,41 @@ TEST_F(rw, fallocate)
 	ASSERT_EQ(memcmp(buf + 1, data0, 2), 0);
 	ASSERT_EQ(memcmp(buf + 1 + 2, buf00, sizeof(buf) - 1 - 2), 0);
 
+	/*
+	 * Allocate an interval well beyond current filesize.
+	 * The file has 14 pieces of 4K blocks (or one large block) before
+	 * before this operation.
+	 * This is expected to allocate at least one new block, or in the
+	 * case of 4K fixed size blocks, 4 new 4K blocks.
+	 * Thus, the result should be 14 + 4 blocks, or 2 blocks.
+	 */
+	r = pmemfile_fallocate(pfp, f, PMEMFILE_FL_KEEP_SIZE, 0x80000, 0x4000);
+	ASSERT_EQ(r, 0) << COND_ERROR(r);
+	ASSERT_EQ(test_pmemfile_path_size(pfp, "/file1"), 0x1000 + 0x10000);
+	EXPECT_TRUE(test_pmemfile_stats_match(
+		pfp, 2, 0, 0, 0, (env_block_size == 4096) ? 14 + 4 : 1 + 1));
+
+	/*
+	 * So, the file size should remain as it was.
+	 * By the way, ftruncate is expected to remove such extra blocks
+	 * over file size, even though it does not have to alter file size.
+	 * The block counts are expected to be 14 or 1 again.
+	 */
+	r = pmemfile_ftruncate(pfp, f, 0x1000 + 0x10000);
+	ASSERT_EQ(r, 0) << COND_ERROR(r);
+	ASSERT_EQ(test_pmemfile_path_size(pfp, "/file1"), 0x1000 + 0x10000);
+	EXPECT_TRUE(test_pmemfile_stats_match(
+		pfp, 2, 0, 0, 0, (env_block_size == 4096) ? 14 : 1));
+
+	/*
+	 * Allocate the same new blocks beyond current file size again.
+	 */
+	r = pmemfile_fallocate(pfp, f, PMEMFILE_FL_KEEP_SIZE, 0x80000, 0x4000);
+	ASSERT_EQ(r, 0) << COND_ERROR(r);
+	ASSERT_EQ(test_pmemfile_path_size(pfp, "/file1"), 0x1000 + 0x10000);
+	EXPECT_TRUE(test_pmemfile_stats_match(
+		pfp, 2, 0, 0, 0, (env_block_size == 4096) ? 14 + 4 : 1 + 1));
+
 	pmemfile_close(pfp, f);
 
 	ASSERT_EQ(pmemfile_unlink(pfp, "/file1"), 0);
