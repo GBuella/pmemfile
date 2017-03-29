@@ -1117,9 +1117,6 @@ vinode_truncate(PMEMfilepool *pfp, struct pmemfile_vinode *vinode,
 {
 	struct pmemfile_inode *inode = vinode->inode;
 
-	if (inode->size == size)
-		return;
-
 	if (vinode->blocks == NULL)
 		vinode_rebuild_block_tree(vinode);
 
@@ -1132,18 +1129,20 @@ vinode_truncate(PMEMfilepool *pfp, struct pmemfile_vinode *vinode,
 	 * Setting all the next and prev fields is pointless, when all the
 	 * blocks are removed.
 	 */
-	if (inode->size > size)
+	if (inode->size >= size)
 		vinode_remove_interval(vinode, size, UINT64_MAX - size);
 	else
 		vinode_allocate_interval(pfp, vinode,
 		    inode->size, size - inode->size);
 
-	TX_ADD_DIRECT(&inode->size);
-	inode->size = size;
+	if (inode->size != size) {
+		TX_ADD_DIRECT(&inode->size);
+		inode->size = size;
 
-	struct pmemfile_time tm;
-	file_get_time(&tm);
-	TX_SET_DIRECT(inode, mtime, tm);
+		struct pmemfile_time tm;
+		file_get_time(&tm);
+		TX_SET_DIRECT(inode, mtime, tm);
+	}
 }
 
 int
