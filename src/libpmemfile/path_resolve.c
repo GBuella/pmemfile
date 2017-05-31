@@ -57,10 +57,17 @@
 static int
 get_stat(struct resolved_path *result, struct stat *buf)
 {
+	const char *path;
+
+	if (result->path_len > 0)
+		path = result->path;
+	else
+		path = ".";
+
 	if (is_fda_null(&result->at.pmem_fda)) {
 		long error_code = syscall_no_intercept(SYS_newfstatat,
 			result->at.kernel_fd,
-			result->path,
+			path,
 			buf,
 			AT_SYMLINK_NOFOLLOW);
 		if (error_code == 0) {
@@ -72,9 +79,9 @@ get_stat(struct resolved_path *result, struct stat *buf)
 	} else {
 		int r = pmemfile_fstatat(result->at.pmem_fda.pool->pool,
 			result->at.pmem_fda.file,
-			result->path,
+			path,
 			(pmemfile_stat_t *)buf,
-			AT_SYMLINK_NOFOLLOW);
+			PMEMFILE_AT_SYMLINK_NOFOLLOW);
 
 		if (r == 0) {
 			return 0;
@@ -251,6 +258,157 @@ exit_pool(struct resolved_path *result, size_t resolved, size_t *size)
 	*size -= resolved;
 }
 
+static const char *
+read_next_component(const char *path, struct resolved_path *result)
+{
+	while (*path != '/' && *path != '\0') {
+		result->path[result->path_len] = *path;
+		result->path_len++;
+		path++;
+	}
+
+	if (*path == '/')
+		result->path[result->path_len++] = '/';
+
+	result->path[result->path_len] = '\0';
+
+	return path;
+}
+
+static bool
+starts_with_dot_dot_entry(const char *path)
+{
+	return path[0] == '.' && path[1] == '.' &&
+	    (path[2] == '/' || path[2] == '\0');
+}
+
+static bool
+must_exit_pool(struct resolved_path *result, const char *path,
+		const struct stat *prev_stat)
+{
+	if (result->pmem_fda->pool == NULL)
+		return false;
+
+	return same_inode(&prev_stat, &result->pmem_fda->pool->pmem_stat) &&
+	    starts_with_dot_dot_entry(path);
+}
+
+static bool
+conditianlly_enter_pool(struct resolved_path *result, const char *path,
+			const struct stat *current_stat)
+{
+	if (result->pmem_fda->pool != NULL)
+		return false;
+
+	struct pool_description *pool;
+
+	pool = lookup_pd_by_inode(current_stat);
+	if (pool != NULL) {
+		if (pool->pool == NULL) {
+			result->error_code = -EIO;
+			return;
+		}
+
+		result->path[0] = '\0';
+		result->path_len = 0;
+		result->at.pmem_fda.pool = pool;
+		result->at.pmem_fda.file = PMEMFILE_AT_CWD;
+	}
+}
+
+static const char *
+exit_pool(char *path, struct resolved_path *result)
+{
+	result->at.kernel_fd = result->at.pmem_fda.pool->fd;
+	result->at.pmem_fda.pool = NULL;
+	result->path[0] = '.';
+	result->path[1] = '.';
+	result->path_len = 2;
+
+	path += 2;
+	path += strspn(path, "/");
+
+	return path;
+}
+
+static void
+next_iteration(char *path,
+		struct resolved_path *result,
+		struct stat stat_buf, /* stat of the previous component */
+		int follow_last)
+{
+	/* perform the next iteration */
+	if (result->error_code != 0)
+		return;
+
+	if (path[0] != '\0') {
+		result->path[result->path_len++] = '/';
+		resolve_next_component(path, result, stat_buf, follow_last);
+	}
+}
+
+/*
+ * resolve_next_component - resolves a single path component
+ *
+ * Intended to be used in a loop, resolving one component at a time.
+ * The arguments at and path describe the remaining path to be resolved.
+ * The argument result is used to stored the information about the path
+ * components already resolved.
+ * 
+ * At each iteration, one path component is resolved, removed from the
+ * beginning of `path`, and appended to the end of `result->path`.
+ */
+static void
+resolve_next_component(char *path,
+		struct resolved_path *result,
+		struct stat stat_buf, /* stat of the previous component */
+		int follow_last)
+{
+	assert(path[0] != '/');
+
+	if (path[0] == '\0')
+		return;
+
+	if (must_exit_pool(result, path, &stat_buf)) {
+		path = exit_pool(result, path);
+		next_iteration(path, result, stat_buf, follow_last);
+		return;
+	}
+
+	size_t original_path_len = result->path_len;
+
+	path = read_next_component(&path, result);
+	path += strspn(path, "/");
+
+	if (*path == '\0' && follow_last == NO_RESOLVE_LAST_SLINK)
+		return;
+
+	struct stat stat_buf;
+	if (get_stat(result, &stat_buf) != 0)
+		return;
+
+	if (S_ISLNK(stat_buf.st_mode)) {
+		char link_buf[sizeof(result->path)];
+		size_t link_len;
+		link_len = resolve_symlink(result, link_buf);
+		if (result->error_code != 0)
+			return;
+
+		if (link_buf[0] == '\0') {
+			strcpy(result->path, link_buf);
+			result->path_len = link_len;
+		} else {
+			strcpy(result->path + original_path_len, link_buf);
+			result->path_len = original_path_len + link_len;
+		}
+
+		result->path_len = original_path_len;
+	}
+	conditianlly_enter_pool(result, path, &stat_buf);
+
+	next_iteration(path, result, stat_buf, follow_last);
+}
+
 /*
  * resolve_path - the main logic for resolving paths containing arbitary
  * combinations of path components in the kernel's vfs and pmemfile pools.
@@ -261,17 +419,41 @@ exit_pool(struct resolved_path *result, size_t resolved, size_t *size)
  */
 void
 resolve_path(struct fd_desc at,
-			const char *path,
+			const char *original_path,
 			struct resolved_path *result,
 			int follow_last)
 {
-	if (path == NULL) {
+	if (path == NULL || path[0] == '\0') {
 		result->error_code = -ENOTDIR;
 		return;
 	}
 
+	struct stat stat_buf;
+	char path[sizeof(result->path)];
+	strcpy(path, original_path);
+
 	result->at = at;
 	result->error_code = 0;
+	result->path_len = 0;
+
+	if (path[0] == '/') {
+		result->at.pmem_fda.pool = NULL;
+		result->at.pmem_fda.kernel_fd = AT_FDCWD;
+		result->path[0] = '/';
+		result->path_len = 1;
+
+		while (path[0] == '/')
+			++path;
+	} else {
+		result->at = at;
+	}
+
+	result->path[result->path_len] = '\0';
+
+	if (get_stat(result, &stat_buf) != 0)
+		return;
+
+	resolve_next_component(path, result, stat_buf, follow_last);
 
 	size_t resolved; /* How many chars are resolved already? */
 	size_t size; /* The length of the whole path to be resolved. */
@@ -286,6 +468,7 @@ resolve_path(struct fd_desc at,
 	}
 
 	if (result->path[size - 1] == '/') {
+		/* remove trailing slash characters */
 		last_component_is_dir = true;
 		while (size > 1 && result->path[size - 1] == '/')
 			--size;
@@ -293,8 +476,6 @@ resolve_path(struct fd_desc at,
 
 	result->path[size] = '\0';
 
-	if (path[0] == '/')
-		result->at.pmem_fda.pool = NULL;
 
 	bool at_pmem_root = false;
 
