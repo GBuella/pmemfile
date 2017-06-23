@@ -40,6 +40,7 @@ execute_process(COMMAND ${CMAKE_COMMAND} -E make_directory ${DIR}/mount_point_wr
 execute_process(COMMAND ${CMAKE_COMMAND} -E make_directory ${DIR}/some_dir)
 execute_process(COMMAND ln -s ../mount_point ${DIR}/some_dir/some_link)
 
+message("LD_PRELOAD is" ${PRELOAD_LIB})
 set(ENV{LD_PRELOAD} ${PRELOAD_LIB})
 set(ENV{PMEMFILE_POOLS} "${DIR}/mount_point:${DIR}/fs;${DIR}/mount_point_wrong:${DIR}/invalid")
 set(ENV{PMEMFILE_PRELOAD_LOG} ${BIN_DIR}/pmemfile_preload.log)

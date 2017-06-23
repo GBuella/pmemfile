@@ -31,12 +31,23 @@
 
 add_executable(preload_basic basic/basic.c)
 add_executable(preload_config config/config.c)
+target_link_libraries(preload_config PRIVATE -W,-z,-stack-size=1G)
+target_link_libraries(preload_config PRIVATE -shared-libasan)
 
 add_cstyle(tests-preload-basic ${CMAKE_CURRENT_SOURCE_DIR}/basic/basic.c)
 add_cstyle(tests-preload-config ${CMAKE_CURRENT_SOURCE_DIR}/config/config.c)
 
 add_check_whitespace(tests-preload-basic ${CMAKE_CURRENT_SOURCE_DIR}/basic/basic.c)
 add_check_whitespace(tests-preload-config ${CMAKE_CURRENT_SOURCE_DIR}/config/config.c)
+
+set(PRELOAD_LIB_LIST $<TARGET_FILE:pmemfile_shared>)
+#if(SANITIZERS)
+#	add_library(sanity_runtime_loader SHARED nop.c)
+#	target_link_libraries(sanity_runtime_loader PRIVATE -shared-libasan)
+#	target_link_libraries(sanity_runtime_loader PRIVATE -lasan)
+#	set(PRELOAD_LIB_LIST $<TARGET_FILE:sanity_runtime_loader>:${PRELOAD_LIB_LIST})
+#endif()
+#set(PRELOAD_LIB_LIST /usr/lib/gcc/x86_64-linux-gnu/6/libasan.so:${PRELOAD_LIB_LIST})
 
 # Configures test ${name}${sub_name} using test dir ${name} and executable ${main_executable}
 function(add_test_generic name sub_name main_executable)
@@ -46,7 +57,7 @@ function(add_test_generic name sub_name main_executable)
 			-DTEST_NAME=${name}${sub_name}
 			-DSRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}/${name}${sub_name}
 			-DBIN_DIR=${CMAKE_CURRENT_BINARY_DIR}/${name}${sub_name}
-			-DPRELOAD_LIB=$<TARGET_FILE:pmemfile_shared>
+			-DPRELOAD_LIB=${PRELOAD_LIB_LIST}
 			-DMAIN_EXECUTABLE=${main_executable}
 			${ARGN}
 			-P ${CMAKE_CURRENT_SOURCE_DIR}/${name}/${name}.cmake)
@@ -63,8 +74,10 @@ else()
 endif()
 
 add_test_generic(basic "" $<TARGET_FILE:preload_basic>)
+if(NOT SANITIZERS)
 add_test_generic(basic_commands "" none)
 add_test_generic(nested_dirs "" none)
+endif()
 
 
 add_test_generic(config "_valid_via_symlink" $<TARGET_FILE:preload_config> -DTEST_PATH=some_dir/some_link/a)

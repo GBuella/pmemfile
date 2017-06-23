@@ -209,10 +209,6 @@ add_flag(-D_LARGEFILE64_SOURCE)
 option(SANITIZERS "enable AddressSanitizer and UndefinedBehaviorSanitizer (debugging) (incompatible with BUILD_LIBPMEMFILE=ON)" OFF)
 
 if(SANITIZERS)
-	if(BUILD_LIBPMEMFILE)
-		message(FATAL_ERROR "Sanitizers are incompatible with LIBPMEMFILE. If you want to test LIBPMEMFILE-POSIX with SANITIZERS define BUILD_LIBPMEMFILE to 0/OFF.")
-	endif()
-
 	set(SAVED_CMAKE_REQUIRED_LIBRARIES ${CMAKE_REQUIRED_LIBRARIES})
 	set(CMAKE_REQUIRED_LIBRARIES "${CMAKE_REQUIRED_LIBRARIES} -fsanitize=address,undefined")
 
