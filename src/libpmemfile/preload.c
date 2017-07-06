@@ -141,7 +141,7 @@ struct pmemfile_entry {
  * writing to other fds.
  * XXX - improve this situation
  */
-static struct pmemfile_entry fd_table[PMEMFILE_MAX_FD + 1];
+static struct pmemfile_entry pmemfile_table[PMEMFILE_MAX_FD + 1];
 
 /*
  * A separate place to keep track of fds used to hold mount points open, in
@@ -157,7 +157,7 @@ is_fd_in_table(long fd)
 	if (fd < 0 || fd > PMEMFILE_MAX_FD)
 		return false;
 
-	return !is_fda_null(&fd_table[fd].pmemfile);
+	return !is_fda_null(&pmemfile_table[fd].pmemfile);
 }
 
 static pthread_rwlock_t pmem_cwd_lock = PTHREAD_RWLOCK_INITIALIZER;
@@ -168,7 +168,7 @@ static pthread_mutex_t fd_table_mutex = PTHREAD_MUTEX_INITIALIZER;
 static void
 fd_unref(long fd, struct fd_association *file)
 {
-	if (__sync_sub_and_fetch(&fd_table[fd].ref_count, 1) == 0) {
+	if (__sync_sub_and_fetch(&pmemfile_table[fd].ref_count, 1) == 0) {
 		(void) syscall_no_intercept(SYS_close, fd);
 
 		pmemfile_close(file->pool->pool, file->file);
@@ -188,8 +188,8 @@ fd_ref(long fd)
 	util_mutex_lock(&fd_table_mutex);
 
 	if (is_fd_in_table(fd)) {
-		__sync_add_and_fetch(&fd_table[fd].ref_count, 1);
-		file = fd_table[fd].pmemfile;
+		__sync_add_and_fetch(&pmemfile_table[fd].ref_count, 1);
+		file = pmemfile_table[fd].pmemfile;
 	}
 
 	util_mutex_unlock(&fd_table_mutex);
@@ -317,9 +317,9 @@ hook_close(long fd)
 	util_mutex_lock(&fd_table_mutex);
 
 	if (is_fd_in_table(fd)) {
-		file = fd_table[fd].pmemfile;
-		fd_table[fd].pmemfile.file = NULL;
-		fd_table[fd].pmemfile.pool = NULL;
+		file = pmemfile_table[fd].pmemfile;
+		pmemfile_table[fd].pmemfile.file = NULL;
+		pmemfile_table[fd].pmemfile.pool = NULL;
 
 		is_fd_pmem = true;
 	}
@@ -891,9 +891,9 @@ openat_helper(long fd, struct resolved_path *where, long flags, long mode)
 
 	util_mutex_lock(&fd_table_mutex);
 
-	__sync_add_and_fetch(&fd_table[fd].ref_count, 1);
-	fd_table[fd].pmemfile.pool = where->at.pmem_fda.pool;
-	fd_table[fd].pmemfile.file = file;
+	__sync_add_and_fetch(&pmemfile_table[fd].ref_count, 1);
+	pmemfile_table[fd].pmemfile.pool = where->at.pmem_fda.pool;
+	pmemfile_table[fd].pmemfile.file = file;
 
 	util_mutex_unlock(&fd_table_mutex);
 
