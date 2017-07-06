@@ -196,4 +196,46 @@ util_rwlock_destroy(pthread_rwlock_t *m)
 	}
 }
 
+/*
+ * util_spin_init -- pthread_spin_init variant that never fails from
+ * caller perspective.
+ */
+static inline void
+util_spin_init(pthread_spinlock_t *l)
+{
+	int tmp = pthread_spin_init(l, PTHREAD_PROCESS_PRIVATE);
+	if (tmp) {
+		errno = tmp;
+		FATAL("!pthread_spin_init");
+	}
+}
+
+/*
+ * util_spin_lock -- pthread_spin_lock variant that never fails from
+ * caller perspective.
+ */
+static inline void
+util_spin_lock(pthread_spinlock_t *l)
+{
+	int tmp = pthread_spin_lock(l);
+	if (tmp) {
+		errno = tmp;
+		FATAL("!pthread_spin_lock");
+	}
+}
+
+/*
+ * util_spin_unlock -- pthread_spin_unlock variant that never fails from
+ * caller perspective.
+ */
+static inline void
+util_spin_unlock(pthread_spinlock_t *l)
+{
+	int tmp = pthread_spin_unlock(l);
+	if (tmp) {
+		errno = tmp;
+		FATAL("!pthread_spin_unlock");
+	}
+}
+
 #endif
