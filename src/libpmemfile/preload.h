@@ -104,6 +104,7 @@ same_inode(const struct stat *st1, const struct stat *st2)
 struct fd_association {
 	struct pool_description *pool;
 	PMEMfile *file;
+	int ref_count;
 };
 
 static inline bool

@@ -111,7 +111,10 @@ log_write(const char *fmt, ...)
 }
 
 static struct pool_description pools[0x100];
+static struct fd_association pool_cwd_fda[ARRAY_SIZE(pools)];
 static int pool_count;
+static int cwd_pool_index;
+static pthread_rwlock_t pmem_cwd_lock = PTHREAD_RWLOCK_INITIALIZER;
 
 static bool is_memfd_syscall_available;
 
@@ -128,11 +131,6 @@ static bool is_memfd_syscall_available;
 #ifndef RWF_SYNC
 #define RWF_SYNC 0x00000004
 #endif
-
-struct pmemfile_entry {
-	struct fd_association pmemfile;
-	int ref_count;
-};
 
 /*
  * pmemfile_table -- the table open files in any pool. One must
@@ -154,12 +152,15 @@ struct pmemfile_entry {
  * |                               |
  * fetch_index                     insert_index
  */
-static struct pmemfile_entry *pmemfile_table_free_slots[PMEMFILE_MAX_FD + 1];
-static pthread_mutex_t pmemfile_table_free_slots_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct fd_association *pmemfile_table_free_slots[PMEMFILE_MAX_FD + 1];
+static pthread_mutex_t pmemfile_table_free_slots_lock =
+		PTHREAD_MUTEX_INITIALIZER;
 
 static void
-mark_as_free_file_slot(struct pmemfile_entry *entry)
+mark_as_free_file_slot(struct fd_association *entry)
 {
+	assert(entry != NULL);
+
 	static unsigned insert_index;
 
 	util_mutex_lock(&pmemfile_table_free_slots_lock);
@@ -171,12 +172,12 @@ mark_as_free_file_slot(struct pmemfile_entry *entry)
 	util_mutex_unlock(&pmemfile_table_free_slots_lock);
 }
 
-static struct pmemfile_entry *
+static struct fd_association *
 fetch_free_file_slot(void)
 {
 	static unsigned fetch_index;
 
-	struct pmemfile_entry *entry;
+	struct fd_association *entry;
 
 	util_mutex_lock(&pmemfile_table_free_slots_lock);
 
@@ -190,21 +191,27 @@ fetch_free_file_slot(void)
 }
 
 /*
- * setup_pmemfile_table -- initializes the pmemfile_table_free_slots array
+ * setup_pmemfile_tables -- initializes the pmemfile_table_free_slots array
  *
  * Adds all entries in pmemfile_table to the ring of free slots.
  * Must be called during library initialization.
  */
 static void
-setup_pmemfile_table(void)
+setup_pmemfile_tables(void)
 {
-	static struct pmemfile_entry pmemfile_table[PMEMFILE_MAX_FD + 1];
+	static struct fd_association pmemfile_table[PMEMFILE_MAX_FD + 1];
 
 	for (unsigned i = 0; i < ARRAY_SIZE(pmemfile_table); ++i)
 		mark_as_free_file_slot(pmemfile_table + i);
+
+	for (unsigned i = 0; i < ARRAY_SIZE(pools); ++i) {
+		pool_cwd_fda[i].pool = pools + i;
+		pool_cwd_fda[i].file = PMEMFILE_AT_CWD;
+	}
 }
 
-static struct pmemfile_entry *fd_table[PMEMFILE_MAX_FD + 1];
+static struct fd_association *fd_table[PMEMFILE_MAX_FD + 1];
+static pthread_mutex_t fd_table_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /*
  * A separate place to keep track of fds used to hold mount points open, in
@@ -223,36 +230,51 @@ is_fd_in_table(long fd)
 	return fd_table[fd] != NULL;
 }
 
-static pthread_rwlock_t pmem_cwd_lock = PTHREAD_RWLOCK_INITIALIZER;
-static struct pool_description *volatile cwd_pool;
-
-static pthread_mutex_t fd_table_mutex = PTHREAD_MUTEX_INITIALIZER;
-
 static void
-file_entry_unref(struct pmemfile_entry *entry)
+file_entry_unref(struct fd_association *entry)
 {
+	if (entry == NULL)
+		return;
+
+	if (entry->file == PMEMFILE_AT_CWD)
+		return;
+
 	if (__sync_sub_and_fetch(&entry->ref_count, 1) == 0) {
-		pmemfile_close(entry->pmemfilex.pool->pool,
-		    entry->pmemfile.file);
+		pmemfile_close(entry->pool->pool,
+		    entry->file);
 
 		log_write("pmemfile_close(%p, %p) = 0",
-		    (void *)entry->pmemfile.pool->pool,
-		    (void *)fentry->pmemfile.file);
+		    (void *)entry->pool->pool,
+		    (void *)entry->file);
 
 		mark_as_free_file_slot(entry);
 	}
 }
 
-static struct pmemfile_entry *
+static struct fd_association *
 file_entry_ref_by_fd(long fd)
 {
-	struct pmemfile_entry *entry = NULL;
+	struct fd_association *entry = NULL;
+
+	if (fd == AT_FDCWD) {
+		int cwd_index =
+		    __atomic_load_n(&cwd_pool_index, __ATOMIC_CONSUME);
+
+		if (cwd_index >= 0)
+			return pool_cwd_fda + cwd_index;
+
+		return NULL;
+	}
 
 	util_mutex_lock(&fd_table_mutex);
 
-	if (fd_table[fd] != NULL)
-		__sync_add_and_fetch(&fd_table[fd]->ref_count, 1);
+	if (fd == AT_FDCWD) {
+		if (cwd_pool_index >= 0)
+			entry = pool_cwd_fda + cwd_pool_index;
+	} else {
 		entry = fd_table[fd];
+		if (entry != NULL)
+			__sync_add_and_fetch(&entry->ref_count, 1);
 	}
 
 	util_mutex_unlock(&fd_table_mutex);
@@ -374,28 +396,21 @@ exit_with_msg(int ret, const char *msg)
 static long
 hook_close(long fd)
 {
-	struct fd_association file;
+	struct fd_association *entry;
 
 	util_mutex_lock(&fd_table_mutex);
 
-	struct pmemfile_entry *entry = fd_table[fd];
+	entry = fd_table[fd];
 
-	if (entry != NULL) {
-		file = entry->pmemfile;
+	if (entry != NULL)
 		fd_table[fd] = NULL;
-	}
 
 	util_mutex_unlock(&fd_table_mutex);
 
 	(void) syscall_no_intercept(SYS_close, fd);
 
-	if (entry != NULL) {
-		file_entry_unref(entry)
-		pmemfile_close(file.pool->pool, file.file);
-
-		log_write("pmemfile_close(%p, %p) = 0",
-		    (void *)file.pool->pool, (void *)file.file);
-	}
+	if (entry != NULL)
+		file_entry_unref(entry);
 
 	return 0;
 }
@@ -2361,9 +2376,9 @@ hook(long syscall_number,
 	else if (filter_entry.fd_first_arg) {
 		struct fd_association *file = file_entry_ref_by_fd(arg0);
 
-		if (!is_fda_null(&file)) {
+		if (file != NULL) {
 			*syscall_return_value = dispatch_syscall_fd_first(
-					syscall_number, &file, arg1, arg2, arg3,
+					syscall_number, file, arg1, arg2, arg3,
 					arg4, arg5);
 
 			file_entry_unref(file);
@@ -2612,7 +2627,7 @@ pmemfile_preload_constructor(void)
 	if (!syscall_hook_in_process_allowed())
 		return;
 
-	setup_pmemfile_table();
+	setup_pmemfile_tables();
 	check_memfd_syscall();
 
 	log_init(getenv("PMEMFILE_PRELOAD_LOG"),
