@@ -152,7 +152,7 @@ static bool is_memfd_syscall_available;
  * |                               |
  * fetch_index                     insert_index
  */
-static struct fd_association *pmemfile_table_free_slots[PMEMFILE_MAX_FD + 1];
+static struct fd_association *pmemfile_table_free_slots[2 * PMEMFILE_MAX_FD];
 static pthread_mutex_t pmemfile_table_free_slots_lock =
 		PTHREAD_MUTEX_INITIALIZER;
 
@@ -207,10 +207,20 @@ setup_pmemfile_tables(void)
 	for (unsigned i = 0; i < ARRAY_SIZE(pools); ++i) {
 		pool_cwd_fda[i].pool = pools + i;
 		pool_cwd_fda[i].file = PMEMFILE_AT_CWD;
+		/* the .ref_count field is not used */
 	}
 }
 
-static struct fd_association *fd_table[PMEMFILE_MAX_FD + 1];
+
+
+struct fd_table_entry {
+	pthread_mutex_t mutex;
+	struct fd_association *file_table_entry;
+};
+
+COMPILE_ERROR_ON(AT_FDCWD != -100);
+static struct fd_table_entry *fd_table_store[PMEMFILE_MAX_FD + 1 + 100];
+static struct fd_table_entry **fd_table = fd_table_store + 100;
 static pthread_mutex_t fd_table_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /*
@@ -261,23 +271,26 @@ file_entry_ref_by_fd(long fd)
 		    __atomic_load_n(&cwd_pool_index, __ATOMIC_CONSUME);
 
 		if (cwd_index >= 0)
-			return pool_cwd_fda + cwd_index;
-
-		return NULL;
-	}
-
-	util_mutex_lock(&fd_table_mutex);
-
-	if (fd == AT_FDCWD) {
-		if (cwd_pool_index >= 0)
-			entry = pool_cwd_fda + cwd_pool_index;
+			entry = pool_cwd_fda + cwd_index;
 	} else {
-		entry = fd_table[fd];
-		if (entry != NULL)
-			__sync_add_and_fetch(&entry->ref_count, 1);
-	}
 
-	util_mutex_unlock(&fd_table_mutex);
+		util_mutex_lock(&fd_table_mutex);
+
+		struct fd_association **file_table_entry = fd_table + fd;
+
+		entry = __atomic_load_n(file_table_entry, __ATOMIC_CONSUME);
+
+		if (entry != NULL) {
+			__sync_add_and_fetch(&entry->ref_count, 1);
+
+			if (entry != __atomic_load_n(file_table_entry, __ATOMIC_CONSUME)) {
+				__sync_sub_and_fetch(&entry->ref_count, 1);
+				entry = NULL;
+			}
+		}
+
+		util_mutex_unlock(&fd_table_mutex);
+	}
 
 	return entry;
 }
@@ -288,8 +301,15 @@ cwd_desc(void)
 	struct fd_desc result;
 
 	result.kernel_fd = AT_FDCWD;
-	result.pmem_fda.pool = cwd_pool;
-	result.pmem_fda.file = PMEMFILE_AT_CWD;
+
+	int i = __atomic_load_n(&cwd_pool_index, __ATOMIC_CONSUME);
+
+	if (i < 0) {
+		static struct fd_association none;
+		result.pmem_fda = &none;
+	} else {
+		result.pmem_fda = pool_cwd_fda + i;
+	}
 
 	return result;
 }
@@ -297,18 +317,9 @@ cwd_desc(void)
 static struct fd_desc
 fd_fetch(long fd)
 {
-	struct fd_desc result;
-
-	result.kernel_fd = fd;
-
-	if ((int)fd == AT_FDCWD) {
-		result.pmem_fda.pool = cwd_pool;
-		result.pmem_fda.file = PMEMFILE_AT_CWD;
-	} else {
-		result.pmem_fda = fd_ref(fd);
-	}
-
-	return result;
+	return (struct fd_desc){
+	    .kernel_fd = fd,
+	    .pmem_fda = file_entry_ref_by_fd(fd)};
 }
 
 static void
