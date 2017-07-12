@@ -75,6 +75,7 @@
 #include "sys_util.h"
 #include "preload.h"
 #include "syscall_early_filter.h"
+#include "vfd_table.h"
 
 static long log_fd = -1;
 
@@ -115,8 +116,6 @@ log_write(const char *fmt, ...)
 
 static struct pool_description pools[0x100];
 static int pool_count;
-
-static bool is_memfd_syscall_available;
 
 #define PMEMFILE_MAX_FD 0x8000
 
@@ -250,51 +249,6 @@ static long check_errno(long e, long syscall_no)
 	return e;
 }
 
-#ifdef SYS_memfd_create
-
-static void
-check_memfd_syscall(void)
-{
-	long fd = syscall_no_intercept(SYS_memfd_create, "check", 0);
-	if (fd >= 0) {
-		is_memfd_syscall_available = true;
-		syscall_no_intercept(SYS_close, fd);
-	}
-}
-
-#else
-
-#define SYS_memfd_create 0
-#define check_memfd_syscall()
-
-#endif
-
-/*
- * acquire_new_fd - grab a new file descriptor from the kernel
- */
-static long
-acquire_new_fd(const char *path)
-{
-	long fd;
-
-	if (is_memfd_syscall_available) {
-		fd = syscall_no_intercept(SYS_memfd_create, path, 0);
-		/* memfd_create can fail for too long name */
-		if (fd < 0) {
-			fd = syscall_no_intercept(SYS_open, "/dev/null",
-					O_RDONLY);
-		}
-	} else {
-		fd = syscall_no_intercept(SYS_open, "/dev/null", O_RDONLY);
-	}
-
-	if (fd > PMEMFILE_MAX_FD) {
-		syscall_no_intercept(SYS_close, fd);
-		return -ENFILE;
-	}
-
-	return fd;
-}
 
 void
 exit_with_msg(int ret, const char *msg)
@@ -903,26 +857,29 @@ openat_helper(long fd, struct resolved_path *where, long flags, long mode)
 	return fd;
 }
 
+static int
+follow_last_in_open_flags(long flags)
+{
+	if ((flags & O_NOFOLLOW) != 0)
+		return NO_RESOLVE_LAST_SLINK;
+	else if ((flags & O_CREAT) != 0)
+		return NO_RESOLVE_LAST_SLINK;
+	else
+		return RESOLVE_LAST_SLINK;
+}
+
 static long
 hook_openat(long fd_at, long arg0, long flags, long mode)
 {
 	long ret = 0;
 	struct resolved_path where;
 	const char *path_arg = (const char *)arg0;
-	int follow_last;
 
 	log_write("%s(\"%s\")", __func__, path_arg);
 
-	if ((flags & O_NOFOLLOW) != 0)
-		follow_last = NO_RESOLVE_LAST_SLINK;
-	else if ((flags & O_CREAT) != 0)
-		follow_last = NO_RESOLVE_LAST_SLINK;
-	else
-		follow_last = RESOLVE_LAST_SLINK;
+	struct vfd_reference at = pmemfile_vfd_at_ref(fd_at);
 
-	struct fd_desc at = fd_fetch(fd_at);
-
-	resolve_path(at, path_arg, &where, follow_last);
+	resolve_path(at, path_arg, &where, follow_last_in_open_flags(flags));
 
 	if (where.error_code != 0) {
 		/* path resolution failed */
@@ -945,7 +902,7 @@ hook_openat(long fd_at, long arg0, long flags, long mode)
 						flags, mode);
 	}
 
-	fd_release(&at);
+	pmemfile_vfd_unref(at);
 
 	return ret;
 }
@@ -2546,6 +2503,29 @@ open_mount_point(struct pool_description *pool)
 	}
 }
 
+static void
+startup_setup_cwd_in_pool(struct pool_description *pool_desc)
+{
+	open_new_pool(pool_desc);
+	if (pool_desc->pool == NULL) {
+		exit_with_msg(
+			PMEMFILE_PRELOAD_EXIT_POOL_OPEN_FAILED,
+			"!opening pmemfile_pool");
+	}
+
+	struct pmemfile_file *file;
+
+	file = pmemfile_open(pool_desc->pool, ".", O_DIRECTORY | O_RDWR);
+
+	if (file == NULL) {
+		exit_with_msg(
+			PMEMFILE_PRELOAD_EXIT_POOL_OPEN_FAILED,
+			"!opening pmemfile_pool cwd");
+	}
+
+	pmemfile_vfd_chdir_pf(pool_desc, file);
+}
+
 /*
  * establish_mount_points - parse the configuration, which is expected to be a
  * semicolon separated list of path-pairs:
@@ -2608,15 +2588,8 @@ establish_mount_points(const char *config)
 		 * accessed, but without doing this, the first access would
 		 * never be noticed.
 		 */
-		if (same_inode(&pool_desc->stat, &kernel_cwd_stat)) {
-			open_new_pool(pool_desc);
-			if (pool_desc->pool == NULL) {
-				exit_with_msg(
-					PMEMFILE_PRELOAD_EXIT_POOL_OPEN_FAILED,
-					"!opening pmemfile_pool");
-			}
-			cwd_pool = pool_desc;
-		}
+		if (same_inode(&pool_desc->stat, &kernel_cwd_stat))
+			startup_setup_cwd_in_pool(pool_desc);
 	} while (config != NULL);
 }
 
@@ -2628,7 +2601,7 @@ pmemfile_preload_constructor(void)
 	if (!syscall_hook_in_process_allowed())
 		return;
 
-	check_memfd_syscall();
+	pmemfile_vfd_table_init();
 
 	log_init(getenv("PMEMFILE_PRELOAD_LOG"),
 			getenv("PMEMFILE_PRELOAD_LOG_TRUNC"));
