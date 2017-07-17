@@ -39,6 +39,8 @@
 #include <pthread.h>
 #include <linux/limits.h>
 
+#include "vfd_table.h"
+
 struct PMEMfilepool;
 struct PMEMfile;
 
@@ -122,13 +124,15 @@ struct fd_desc {
 struct resolved_path {
 	long error_code;
 
-	struct fd_desc at;
+	long at_kernel_fd;
+	struct pool_description *at_pool;
+	struct pmemfile_file *at_file;
 
 	char path[PATH_MAX];
 	size_t path_len;
 };
 
-void resolve_path(struct fd_desc at,
+void resolve_path(struct vfd_reference at,
 			const char *path,
 			struct resolved_path *result,
 			int flags);
