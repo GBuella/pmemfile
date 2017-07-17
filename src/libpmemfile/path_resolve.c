@@ -260,7 +260,7 @@ exit_pool(struct resolved_path *result, size_t resolved, size_t *size)
  * via the kernel.
  */
 void
-resolve_path(struct fd_desc at,
+resolve_path(struct vfd_reference at,
 			const char *path,
 			struct resolved_path *result,
 			int flags)
@@ -270,7 +270,9 @@ resolve_path(struct fd_desc at,
 		return;
 	}
 
-	result->at = at;
+	result->at_kernel_fd = at.kernel_fd;
+	result->at_pool = at.pool;
+	result->at_file = at.file;
 	result->error_code = 0;
 
 	size_t resolved; /* How many chars are resolved already? */

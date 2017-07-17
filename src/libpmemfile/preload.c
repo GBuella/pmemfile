@@ -295,72 +295,72 @@ hook_close(long fd)
 }
 
 static long
-hook_write(struct fd_association *file, const char *buffer, size_t count)
+hook_write(struct vfd_reference file, const char *buffer, size_t count)
 {
-	long r = pmemfile_write(file->pool->pool, file->file, buffer, count);
+	long r = pmemfile_write(file.pool->pool, file.file, buffer, count);
 
 	if (r < 0)
 		r = -errno;
 
 	log_write("pmemfile_write(%p, %p, %p, %zu) = %ld",
-	    (void *)file->pool->pool, (void *)file->file,
+	    (void *)file.pool->pool, (void *)file.file,
 	    (void *)buffer, count, r);
 
 	return check_errno(r, SYS_write);
 }
 
 static long
-hook_writev(struct fd_association *file, const struct iovec *iov, int iovcnt)
+hook_writev(struct vfd_reference *file, const struct iovec *iov, int iovcnt)
 {
-	long r = pmemfile_writev(file->pool->pool, file->file, iov, iovcnt);
+	long r = pmemfile_writev(file.pool->pool, file.file, iov, iovcnt);
 
 	if (r < 0)
 		r = -errno;
 
 	log_write("pmemfile_writev(%p, %p, %p, %d) = %ld",
-	    (void *)file->pool->pool, (void *)file->file,
+	    (void *)file.pool->pool, (void *)file.file,
 	    (void *)iov, iovcnt, r);
 
 	return check_errno(r, SYS_writev);
 }
 
 static long
-hook_read(struct fd_association *file, char *buffer, size_t count)
+hook_read(struct vfd_reference file, char *buffer, size_t count)
 {
-	long r = pmemfile_read(file->pool->pool, file->file, buffer, count);
+	long r = pmemfile_read(file.pool->pool, file.file, buffer, count);
 
 	if (r < 0)
 		r = -errno;
 
 	log_write("pmemfile_read(%p, %p, %p, %zu) = %ld",
-	    (void *)file->pool, (void *)file->file,
+	    (void *)file.pool->pool, (void *)file.file,
 	    (void *)buffer, count, r);
 
 	return check_errno(r, SYS_read);
 }
 
 static long
-hook_readv(struct fd_association *file, const struct iovec *iov, int iovcnt)
+hook_readv(struct vfd_reference file, const struct iovec *iov, int iovcnt)
 {
-	long r = pmemfile_readv(file->pool->pool, file->file, iov, iovcnt);
+	long r = pmemfile_readv(file.pool->pool, file.file, iov, iovcnt);
 
 	if (r < 0)
 		r = -errno;
 
 	log_write("pmemfile_readv(%p, %p, %p, %d) = %ld",
-	    (void *)file->pool, (void *)file->file,
+	    (void *)file.pool->pool, (void *)file->file,
 	    (void *)iov, iovcnt, r);
 
 	return check_errno(r, SYS_readv);
 }
 
 static long
-hook_lseek(struct fd_association *file, long offset, int whence)
+hook_lseek(struct vfd_reference file, long offset, int whence)
 {
-	long r = pmemfile_lseek(file->pool->pool, file->file, offset, whence);
+	long r = pmemfile_lseek(file.pool->pool, file.file, offset, whence);
 
 	log_write("pmemfile_lseek(%p, %p, %lu, %d) = %ld",
-	    (void *)file->pool->pool, (void *)file->file, offset, whence, r);
+	    (void *)file.pool->pool, (void *)file.file, offset, whence, r);
 
 	if (r < 0)
 		r = -errno;
@@ -375,8 +375,8 @@ hook_linkat(long fd0, long arg0, long fd1, long arg1, long flags)
 	struct resolved_path where_old;
 	struct resolved_path where_new;
 
-	struct fd_desc at0 = fd_fetch(fd0);
-	struct fd_desc at1 = fd_fetch(fd1);
+	struct vfd_reference at0 = pmemfile_vfd_at_ref(fd0);
+	struct vfd_reference at1 = pmemfile_vfd_at_ref(fd1);
 
 	resolve_path(at0, (const char *)arg0, &where_old, RESOLVE_LAST_SLINK);
 	resolve_path(at1, (const char *)arg1, &where_new,
@@ -386,31 +386,31 @@ hook_linkat(long fd0, long arg0, long fd1, long arg1, long flags)
 		ret = where_old.error_code;
 	} else if (where_new.error_code != 0) {
 		ret = where_new.error_code;
-	} else if (where_new.at.pmem_fda.pool != where_old.at.pmem_fda.pool) {
+	} else if (where_new.at.pool != where_old.at.pool) {
 		/* cross-pool link are not possible */
 		ret = -EXDEV;
-	} else if (is_fda_null(&where_new.at.pmem_fda)) {
+	} else if (where_new.at_pool == NULL) {
 		ret = syscall_no_intercept(SYS_linkat,
-		    where_old.at.kernel_fd, where_old.path,
-		    where_new.at.kernel_fd, where_new.path, flags);
+		    where_old.at_kernel_fd, where_old.path,
+		    where_new.at_kernel_fd, where_new.path, flags);
 	} else {
-		int r = pmemfile_linkat(where_old.at.pmem_fda.pool->pool,
-			    where_old.at.pmem_fda.file, where_old.path,
-			    where_new.at.pmem_fda.file, where_new.path,
+		int r = pmemfile_linkat(where_old.at_pool->pool,
+			    where_old.at_file, where_old.path,
+			    where_new.at_file, where_new.path,
 				(int)flags);
 
 		if (r != 0)
 			r = -errno;
 
 		log_write("pmemfile_link(%p, \"%s\", \"%s\", %ld) = %d",
-		    (void *)where_old.at.pmem_fda.pool->pool,
+		    (void *)where_old.at_pool->pool,
 		    where_old.path, where_new.path, flags, r);
 
 		ret = check_errno(r, SYS_linkat);
 	}
 
-	fd_release(&at0);
-	fd_release(&at1);
+	pmemfile_vfd_unref(at0);
+	pmemfile_vfd_unref(at1);
 
 	return ret;
 }
@@ -2077,15 +2077,14 @@ dispatch_syscall(long syscall_number,
 
 static long
 dispatch_syscall_fd_first(long syscall_number,
-			struct fd_association *arg0, long arg1,
+			struct vfd_reference arg0, long arg1,
 			long arg2, long arg3,
 			long arg4, long arg5)
 {
 	switch (syscall_number) {
 
 	case SYS_write:
-		return hook_write(arg0, (const char *)arg1,
-			(size_t)arg2);
+		return hook_write(arg0, (const char *)arg1, (size_t)arg2);
 
 	case SYS_writev:
 		return hook_writev(arg0, (struct iovec *)arg1, (int)arg2);
@@ -2314,18 +2313,13 @@ hook(long syscall_number,
 	if (!filter_entry.must_handle)
 		return NOT_HOOKED;
 
-	int is_hooked;
-
-	if (filter_entry.cwd_rlock)
-		util_rwlock_rdlock(&pmem_cwd_lock);
-
-	is_hooked = HOOKED;
-
 	if (filter_entry.fd_first_arg) {
-		struct fd_association file = fd_ref(arg0);
+		struct vfd_reference file = pmemfile_vfd_ref(arg0);
 
-		if (is_fda_null(&file)) {
-			is_hooked = NOT_HOOKED;
+		if (file.pool == NULL) {
+			*syscall_return_value =
+			    syscall_no_intercept(syscall_number,
+			    arg0, arg1, arg2, arg3, arg4, arg5);
 		} else if (filter_entry.returns_zero) {
 			*syscall_return_value = 0;
 		} else if (filter_entry.returns_ENOTSUP) {
@@ -2334,21 +2328,17 @@ hook(long syscall_number,
 		} else {
 			*syscall_return_value =
 			    dispatch_syscall_fd_first(syscall_number,
-			    &file, arg1, arg2, arg3, arg4, arg5);
+			    file, arg1, arg2, arg3, arg4, arg5);
 		}
 
-		if (!is_fda_null(&file))
-			fd_unref(arg0, &file);
+		pmemfile_vfd_unref(file);
 	}
-	else
+	else {
 		*syscall_return_value = dispatch_syscall(syscall_number,
 			arg0, arg1, arg2, arg3, arg4, arg5);
+	}
 
-
-	if (filter_entry.cwd_rlock)
-		util_rwlock_unlock(&pmem_cwd_lock);
-
-	return is_hooked;
+	return HOOKED;
 }
 
 /*
