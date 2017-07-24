@@ -348,7 +348,10 @@ pmemfile_vfd_chdir_pf(struct pool_description *pool, struct pmemfile_file *file)
 
 	chdir_exchange_entry(entry);
 
-	return 0;
+	if (pmemfile_fchdir(pool, file) == 0)
+		return 0;
+	else
+		return -errno;
 }
 
 long
@@ -468,7 +471,8 @@ pmemfile_vfd_fchdir(long vfd)
 			result = new_fd;
 
 		if (result == 0) {
-			struct vfile_description *entry = fetch_free_file_slot();
+			struct vfile_description *entry =
+						fetch_free_file_slot();
 
 			*entry = (struct vfile_description) {
 				.pool = NULL, .file = NULL,
