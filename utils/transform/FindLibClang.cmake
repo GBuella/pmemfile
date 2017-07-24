@@ -1,0 +1,10 @@
+
+find_package(LLVM REQUIRED)
+
+add_library(clang SHARED IMPORTED)
+
+set_target_properties(clang PROPERTIES
+	IMPORTED_LOCATION "${LLVM_LIBRARY_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}clang${CMAKE_SHARED_LIBRARY_SUFFIX}"
+	INTERFACE_INCLUDE_DIRECTORIES "${LLVM_INCLUDE_DIRS}")
+
+#include(FindPackageHandleStandardArgs)
