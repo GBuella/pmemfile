@@ -42,10 +42,12 @@ void *
 pmemfile_mmap(PMEMfilepool *pfp, void *addr, size_t len,
 		int prot, int flags, PMEMfile *file, pmemfile_off_t off)
 {
+	(void) pfp;
 	(void) addr;
 	(void) len;
 	(void) prot;
 	(void) flags;
+	(void) file;
 	(void) off;
 
 	errno = ENOTSUP;
@@ -55,6 +57,7 @@ pmemfile_mmap(PMEMfilepool *pfp, void *addr, size_t len,
 int
 pmemfile_munmap(PMEMfilepool *pfp, void *addr, size_t len)
 {
+	(void) pfp;
 	(void) addr;
 	(void) len;
 
@@ -66,6 +69,7 @@ void *
 pmemfile_mremap(PMEMfilepool *pfp, void *old_addr, size_t old_size,
 			size_t new_size, int flags, void *new_addr)
 {
+	(void) pfp;
 	(void) old_addr;
 	(void) new_addr;
 	(void) old_size;
@@ -79,6 +83,7 @@ pmemfile_mremap(PMEMfilepool *pfp, void *old_addr, size_t old_size,
 int
 pmemfile_msync(PMEMfilepool *pfp, void *addr, size_t len, int flags)
 {
+	(void) pfp;
 	(void) addr;
 	(void) len;
 	(void) flags;
@@ -90,6 +95,7 @@ pmemfile_msync(PMEMfilepool *pfp, void *addr, size_t len, int flags)
 int
 pmemfile_mprotect(PMEMfilepool *pfp, void *addr, size_t len, int prot)
 {
+	(void) pfp;
 	(void) addr;
 	(void) len;
 	(void) prot;

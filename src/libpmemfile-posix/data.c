@@ -207,6 +207,8 @@ file_allocate_block_data(PMEMfilepool *pfp,
 	pmemobj_memset_persist(pfp->pop, data, 0x66, size);
 	VALGRIND_REMOVE_FROM_TX(data, size);
 	VALGRIND_DO_MAKE_MEM_UNDEFINED(data, size);
+#else
+	(void) pfp;
 #endif
 
 	block->size = size;

@@ -45,6 +45,8 @@ static char *filename;
 static void *
 fd_close(void *x)
 {
+	(void) x;
+
 	for (int i = 0; i < 100000; i++) {
 		close(fd);
 

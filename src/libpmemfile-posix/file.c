@@ -707,6 +707,9 @@ pmemfile_close(PMEMfilepool *pfp, PMEMfile *file)
 PMEMfile *
 pmemfile_dup(PMEMfilepool *pfp, PMEMfile *file)
 {
+	(void) pfp;
+	(void) file;
+
 	errno = ENOTSUP;
 	return NULL;
 }
@@ -714,6 +717,10 @@ pmemfile_dup(PMEMfilepool *pfp, PMEMfile *file)
 PMEMfile *
 pmemfile_dup2(PMEMfilepool *pfp, PMEMfile *file, PMEMfile *file2)
 {
+	(void) pfp;
+	(void) file;
+	(void) file2;
+
 	errno = ENOTSUP;
 	return NULL;
 }

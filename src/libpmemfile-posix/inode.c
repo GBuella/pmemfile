@@ -448,6 +448,9 @@ inode_free_reg_file(PMEMfilepool *pfp, struct pmemfile_inode *inode)
 static void
 inode_free_symlink(PMEMfilepool *pfp, struct pmemfile_inode *inode)
 {
+	(void) pfp;
+	(void) inode;
+
 	ASSERT_IN_TX();
 
 	/* nothing to be done */

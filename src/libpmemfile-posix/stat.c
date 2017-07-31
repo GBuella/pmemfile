@@ -61,6 +61,8 @@ static int
 vinode_stat(PMEMfilepool *pfp, struct pmemfile_vinode *vinode,
 		pmemfile_stat_t *buf)
 {
+	(void) pfp;
+
 	struct pmemfile_inode *inode = vinode->inode;
 
 	if (!buf)

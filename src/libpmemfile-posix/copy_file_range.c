@@ -44,6 +44,7 @@ pmemfile_copy_file_range(PMEMfilepool *pfp,
 		PMEMfile *file_out, pmemfile_off_t *off_out,
 		size_t len, unsigned flags)
 {
+	(void) pfp;
 	(void) file_in;
 	(void) off_in;
 	(void) file_out;

@@ -41,6 +41,8 @@
 int
 pmemfile_flock(PMEMfilepool *pfp, PMEMfile *file, int operation)
 {
+	(void) pfp;
+	(void) file;
 	(void) operation;
 
 	errno = ENOTSUP;

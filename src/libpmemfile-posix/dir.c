@@ -126,6 +126,7 @@ vinode_replace_debug_path_locked(PMEMfilepool *pfp,
 #else
 	(void) pfp;
 	(void) parent_vinode;
+	(void) child_vinode;
 	(void) name;
 	(void) namelen;
 #endif

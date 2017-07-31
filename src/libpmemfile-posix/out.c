@@ -126,6 +126,10 @@ out_init(const char *log_prefix, const char *log_level_var,
 		const char *log_file_var, int major_version,
 		int minor_version)
 {
+#ifndef DEBUG
+	(void) log_level_var;
+	(void) log_file_var;
+#endif
 	static int once;
 
 	/* only need to initialize the out module once */
@@ -356,6 +360,12 @@ static void
 out_error(const char *file, int line, const char *func,
 		const char *suffix, const char *fmt, va_list ap)
 {
+#ifndef DEBUG
+	(void) file;
+	(void) line;
+	(void) func;
+	(void) suffix;
+#endif
 	int oerrno = errno;
 	unsigned cc = 0;
 	int ret;

@@ -1472,6 +1472,8 @@ static long
 hook_name_to_handle_at(long fd, const char *path,
 		struct file_handle *handle, int *mount_id, int flags)
 {
+	(void) handle;
+
 	struct resolved_path where;
 
 	struct fd_desc at = fd_fetch(fd);

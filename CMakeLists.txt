@@ -164,6 +164,7 @@ macro(add_flag flag)
 endmacro()
 
 add_flag(-Wall)
+add_flag(-Wextra)
 add_flag(-Wpointer-arith)
 add_flag(-Wunused-macros)
 add_flag(-Wsign-conversion)
@@ -189,6 +190,7 @@ add_flag(-fno-common)
 # See also: https://gcc.gnu.org/bugzilla/show_bug.cgi?id=36750
 if("${CMAKE_C_COMPILER_ID}" MATCHES "Clang")
 	add_c_flag(-Wno-missing-field-initializers)
+	add_cxx_flag(-Wno-missing-field-initializers)
 endif()
 
 add_c_flag(-Wmissing-prototypes)
