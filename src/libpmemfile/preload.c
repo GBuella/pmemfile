@@ -1861,6 +1861,11 @@ hook(long syscall_number,
 		return HOOKED;
 	}
 
+	if (syscall_number == SYS_dup) {
+		*syscall_return_value = pmemfile_vfd_dup((int)arg0);
+		return HOOKED;
+	}
+
 	struct syscall_early_filter_entry filter_entry;
 	filter_entry = get_early_filter_entry(syscall_number);
 
