@@ -51,6 +51,7 @@ set(SOURCES
 	inode_array.c
 	link.c
 	locks.c
+	lock_free_iterator.c
 	lseek.c
 	mkdir.c
 	mknod.c

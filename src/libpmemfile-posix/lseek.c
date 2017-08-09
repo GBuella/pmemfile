@@ -305,6 +305,23 @@ pmemfile_lseek_locked(PMEMfilepool *pfp, PMEMfile *file, pmemfile_off_t offset,
 	return ret;
 }
 
+static void
+update_pos_cache_on_lseek(struct lock_free_iterator *pos,
+			size_t new_offset, size_t original_offset)
+{
+	if (!is_lfit_initialized(pos))
+		return;
+
+	ssize_t delta = (ssize_t)new_offset - (ssize_t)original_offset;
+
+	if (delta >= 0 && (size_t)delta < pos->length) {
+		pos->address += (size_t)delta;
+		pos->length -= (size_t)delta;
+	} else {
+		lfit_invalidate(pos);
+	}
+}
+
 /*
  * pmemfile_lseek -- changes file current offset
  */
@@ -328,7 +345,13 @@ pmemfile_lseek(PMEMfilepool *pfp, PMEMfile *file, pmemfile_off_t offset,
 	pmemfile_off_t ret;
 
 	os_mutex_lock(&file->mutex);
+
+	size_t original_offset = file->offset;
 	ret = pmemfile_lseek_locked(pfp, file, offset, whence);
+	if (ret >= 0)
+		update_pos_cache_on_lseek(&file->pos_cache,
+					(size_t)ret, original_offset);
+
 	os_mutex_unlock(&file->mutex);
 
 	return ret;

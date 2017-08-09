@@ -223,8 +223,14 @@ pmemfile_fallocate(PMEMfilepool *pfp, PMEMfile *file, int mode,
 
 	os_rwlock_wrlock(&vinode->rwlock);
 
+	if ((mode & PMEMFILE_FALLOC_FL_PUNCH_HOLE) != 0)
+		vinode->pre_write_counter++;
+
 	error = vinode_fallocate(pfp, vinode, mode, (uint64_t)offset,
 			(uint64_t)length);
+
+	if ((mode & PMEMFILE_FALLOC_FL_PUNCH_HOLE) != 0)
+		vinode->post_write_counter++;
 
 	os_rwlock_unlock(&vinode->rwlock);
 

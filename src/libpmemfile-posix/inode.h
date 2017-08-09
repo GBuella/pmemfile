@@ -45,6 +45,9 @@ struct pmemfile_vinode {
 	/* reference counter */
 	uint32_t ref;
 
+	uint64_t pre_write_counter;
+	uint64_t post_write_counter;
+
 	/* read-write lock, also protects inode read/writes */
 	os_rwlock_t rwlock;
 

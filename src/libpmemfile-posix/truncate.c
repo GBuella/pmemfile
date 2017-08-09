@@ -119,7 +119,9 @@ _pmemfile_ftruncate(PMEMfilepool *pfp, struct pmemfile_vinode *vinode,
 
 	os_rwlock_wrlock(&vinode->rwlock);
 
+	vinode->pre_write_counter++;
 	int error = vinode_truncate(pfp, vinode, length);
+	vinode->post_write_counter++;
 
 	os_rwlock_unlock(&vinode->rwlock);
 

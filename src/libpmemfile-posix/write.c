@@ -49,7 +49,7 @@
  */
 static void
 vinode_write(PMEMfilepool *pfp, struct pmemfile_vinode *vinode, size_t offset,
-		struct pmemfile_block_desc **last_block,
+		struct lock_free_iterator *lfit,
 		const char *buf, size_t count)
 {
 	ASSERT_IN_TX();
@@ -66,19 +66,25 @@ vinode_write(PMEMfilepool *pfp, struct pmemfile_vinode *vinode, size_t offset,
 	/* All blocks needed for writing are properly allocated at this point */
 
 	struct pmemfile_block_desc *block =
-		find_closest_block_with_hint(vinode, offset, *last_block);
+		find_closest_block_with_hint(vinode, offset,
+			(lfit != NULL) ? lfit->block_pointer_cache : NULL);
 
 	block = iterate_on_file_range(pfp, vinode, block, offset,
 			count, (char *)buf, write_to_blocks);
 
-	if (block)
-		*last_block = block;
+	if (lfit != NULL) {
+		if (offset + count < vinode->inode->size)
+			lfit_setup(pfp, lfit, vinode, block, offset + count,
+				vinode->inode->size);
+		else
+			lfit_invalidate(lfit);
+	}
 }
 
 static pmemfile_ssize_t
 pmemfile_pwritev_internal(PMEMfilepool *pfp,
 		struct pmemfile_vinode *vinode,
-		struct pmemfile_block_desc **last_block,
+		struct lock_free_iterator *lfit,
 		uint64_t file_flags,
 		size_t offset,
 		const pmemfile_iovec_t *iov,
@@ -129,6 +135,8 @@ pmemfile_pwritev_internal(PMEMfilepool *pfp,
 
 	vinode_snapshot(vinode);
 
+	vinode->pre_write_counter++;
+
 	TX_BEGIN_CB(pfp->pop, cb_queue, pfp) {
 		if (file_flags & PFILE_APPEND)
 			offset = inode->size;
@@ -172,7 +180,7 @@ pmemfile_pwritev_internal(PMEMfilepool *pfp,
 				len = SIZE_MAX - offset;
 
 			if (len > 0)
-				vinode_write(pfp, vinode, offset, last_block,
+				vinode_write(pfp, vinode, offset, lfit,
 						iov[i].iov_base, len);
 
 			ret += len;
@@ -211,6 +219,11 @@ pmemfile_pwritev_internal(PMEMfilepool *pfp,
 		vinode_restore_on_abort(vinode);
 	} TX_END
 
+	vinode->post_write_counter++;
+
+	if (lfit != NULL)
+		lfit->last_post_write_counter = vinode->post_write_counter;
+
 end:
 	os_rwlock_unlock(&vinode->rwlock);
 
@@ -242,17 +255,15 @@ pmemfile_write(PMEMfilepool *pfp, PMEMfile *file, const void *buf, size_t count)
 
 	os_mutex_lock(&file->mutex);
 
-	struct pmemfile_block_desc *last_block = file->block_pointer_cache;
 	pmemfile_iovec_t vec;
 	vec.iov_base = (void *)buf;
 	vec.iov_len = count;
 
 	pmemfile_ssize_t ret = pmemfile_pwritev_internal(pfp, file->vinode,
-			&last_block, file->flags, file->offset, &vec, 1);
-	if (ret >= 0) {
+			&file->pos_cache, file->flags, file->offset, &vec, 1);
+
+	if (ret >= 0)
 		file->offset += (size_t)ret;
-		file->block_pointer_cache = last_block;
-	}
 
 	os_mutex_unlock(&file->mutex);
 
@@ -277,14 +288,11 @@ pmemfile_writev(PMEMfilepool *pfp, PMEMfile *file, const pmemfile_iovec_t *iov,
 
 	os_mutex_lock(&file->mutex);
 
-	struct pmemfile_block_desc *last_block = file->block_pointer_cache;
-
 	pmemfile_ssize_t ret = pmemfile_pwritev_internal(pfp, file->vinode,
-			&last_block, file->flags, file->offset, iov, iovcnt);
-	if (ret >= 0) {
+		&file->pos_cache, file->flags, file->offset, iov, iovcnt);
+
+	if (ret >= 0)
 		file->offset += (size_t)ret;
-		file->block_pointer_cache = last_block;
-	}
 
 	os_mutex_unlock(&file->mutex);
 
@@ -314,7 +322,6 @@ pmemfile_pwrite(PMEMfilepool *pfp, PMEMfile *file, const void *buf,
 
 	os_mutex_lock(&file->mutex);
 
-	struct pmemfile_block_desc *last_block = file->block_pointer_cache;
 	struct pmemfile_vinode *vinode = file->vinode;
 	uint64_t flags = file->flags;
 
@@ -324,7 +331,7 @@ pmemfile_pwrite(PMEMfilepool *pfp, PMEMfile *file, const void *buf,
 	vec.iov_base = (void *)buf;
 	vec.iov_len = count;
 
-	return pmemfile_pwritev_internal(pfp, vinode, &last_block, flags,
+	return pmemfile_pwritev_internal(pfp, vinode, NULL, flags,
 			(size_t)offset, &vec, 1);
 }
 
@@ -351,12 +358,11 @@ pmemfile_pwritev(PMEMfilepool *pfp, PMEMfile *file, const pmemfile_iovec_t *iov,
 
 	os_mutex_lock(&file->mutex);
 
-	struct pmemfile_block_desc *last_block = file->block_pointer_cache;
 	struct pmemfile_vinode *vinode = file->vinode;
 	uint64_t flags = file->flags;
 
 	os_mutex_unlock(&file->mutex);
 
-	return pmemfile_pwritev_internal(pfp, vinode, &last_block, flags,
+	return pmemfile_pwritev_internal(pfp, vinode, NULL, flags,
 			(size_t)offset, iov, iovcnt);
 }

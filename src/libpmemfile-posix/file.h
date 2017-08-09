@@ -39,6 +39,7 @@
 #include <stddef.h>
 #include "inode.h"
 #include "layout.h"
+#include "lock_free_iterator.h"
 #include "os_thread.h"
 
 #define PFILE_READ (1ULL << 0)
@@ -64,8 +65,7 @@ struct pmemfile_file {
 	/* requested/current position */
 	size_t offset;
 
-	/* current position cache, the latest block used */
-	struct pmemfile_block_desc *block_pointer_cache;
+	struct lock_free_iterator pos_cache;
 
 	/* current position cache if directory */
 	struct pmemfile_dir_pos {
