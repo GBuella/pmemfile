@@ -144,26 +144,9 @@ lfit_setup(PMEMfilepool *pfp, struct lock_free_iterator *lfit,
 		return;
 	}
 
-	lfit->last_pre_write_counter = vinode->pre_write_counter;
-	lfit->last_post_write_counter = vinode->post_write_counter;
-
 	lfit->block_pointer_cache = block;
 
 	lfit_setup_range(pfp, lfit, vinode, block, offset, file_size);
-}
-
-/*
- * is_modification_indicated -- checks if the counters match.
- * If any of the two counters differ from the ones read from vinode, that
- * means some content or metadata of the file was modified since the counters
- * were set up in lfit_setup.
- */
-static bool
-is_modification_indicated(const struct lock_free_iterator *it,
-				const struct pmemfile_vinode *vinode)
-{
-	return (it->last_pre_write_counter != vinode->pre_write_counter) ||
-		(it->last_post_write_counter != vinode->post_write_counter);
 }
 
 /*

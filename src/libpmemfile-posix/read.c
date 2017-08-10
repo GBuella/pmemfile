@@ -96,14 +96,13 @@ time_cmp(const struct pmemfile_time *t1, const struct pmemfile_time *t2)
 }
 
 static pmemfile_ssize_t
-pmemfile_preadv_internal(PMEMfilepool *pfp,
-		struct pmemfile_vinode *vinode,
-		struct lock_free_iterator *lfit,
-		uint64_t file_flags,
+pmemfile_preadv_internal(PMEMfilepool *pfp, PMEMfile *file,
 		size_t offset,
 		const pmemfile_iovec_t *iov,
 		int iovcnt)
 {
+	struct pmemfile_vinode *vinode = file->vinode;
+
 	LOG(LDBG, "vinode %p iov %p iovcnt %d", vinode, iov, iovcnt);
 
 	if (!vinode_is_regular_file(vinode)) {
@@ -111,7 +110,7 @@ pmemfile_preadv_internal(PMEMfilepool *pfp,
 		return -1;
 	}
 
-	if (!(file_flags & PFILE_READ)) {
+	if (!(file->flags & PFILE_READ)) {
 		errno = EBADF;
 		return -1;
 	}
@@ -177,7 +176,7 @@ pmemfile_preadv_internal(PMEMfilepool *pfp,
 			break;
 	}
 
-	bool update_atime = !(file_flags & PFILE_NOATIME);
+	bool update_atime = !(file->flags & PFILE_NOATIME);
 	struct pmemfile_time tm;
 
 	if (update_atime) {
@@ -195,6 +194,11 @@ pmemfile_preadv_internal(PMEMfilepool *pfp,
 				time_cmp(&inode->atime, &inode->mtime) < 0;
 		}
 	}
+
+	file->last_pre_modification_counter =
+		vinode->pre_modification_counter;
+	file->last_post_modification_counter =
+		vinode->post_modification_counter;
 
 	os_rwlock_unlock(&vinode->rwlock);
 

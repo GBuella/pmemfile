@@ -53,6 +53,10 @@ struct pmemfile_file {
 	/* volatile inode */
 	struct pmemfile_vinode *vinode;
 
+	/* counters that help in the detection of vinode/inode modifications */
+	uint64_t last_pre_modification_counter;
+	uint64_t last_post_modification_counter;
+
 	/*
 	 * Protects against changes to offset / position cache from multiple
 	 * threads.
@@ -65,6 +69,7 @@ struct pmemfile_file {
 	/* requested/current position */
 	size_t offset;
 
+	/* current position cache if regular file */
 	struct lock_free_iterator pos_cache;
 
 	/* current position cache if directory */
@@ -76,5 +81,20 @@ struct pmemfile_file {
 		unsigned dir_id;
 	} dir_pos;
 };
+
+/*
+ * is_modification_indicated -- detects modifications of the underlying file.
+ * If any of the two counters differ from the ones read from vinode, that
+ * means some content or metadata of the underlying file was modified since the
+ * counters were set up.
+ */
+static inline bool
+is_modification_indicated(const struct pmemfile_file *file)
+{
+	return (file->last_pre_modification_counter !=
+			file->vinode->pre_modification_counter) ||
+		(file->last_post_modification_counter !=
+			file->vinode->post_modification_counter);
+}
 
 #endif

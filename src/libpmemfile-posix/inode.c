@@ -124,8 +124,8 @@ inode_ref(PMEMfilepool *pfp, TOID(struct pmemfile_inode) inode,
 	 * Make sure newly allocate files pointers (with their counters set
 	 * to zero) are not going to use the fast path on first access.
 	 */
-	vinode->pre_write_counter = 1;
-	vinode->post_write_counter = 1;
+	vinode->pre_modification_counter = 1;
+	vinode->post_modification_counter = 1;
 
 	os_rwlock_wrlock(&pfp->inode_map_rwlock);
 
