@@ -42,6 +42,7 @@
 #include "libpmemfile-posix.h"
 #include "out.h"
 #include "pool.h"
+#include "read.h"
 #include "utils.h"
 
 /*
@@ -286,11 +287,13 @@ pmemfile_writev_under_filelock(PMEMfilepool *pfp, PMEMfile *file,
 
 	os_rwlock_unlock(&file->vinode->rwlock);
 
-	if (ret > 0) {
+	if (ret >= 0) {
 		file->offset += (size_t)ret;
 		file->block_pointer_cache = last_block;
+		update_read_fastpath_data(pfp, file);
 	} else {
 		file->block_pointer_cache = NULL;
+		clear_read_fastpath_data(file);
 	}
 
 	return ret;

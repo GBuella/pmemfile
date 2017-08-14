@@ -39,6 +39,7 @@
 #include "inode.h"
 #include "libpmemfile-posix.h"
 #include "out.h"
+#include "read.h"
 #include "utils.h"
 
 /*
@@ -300,6 +301,7 @@ pmemfile_lseek_locked(PMEMfilepool *pfp, PMEMfile *file, pmemfile_off_t offset,
 			LOG(LDBG, "off diff: old %lu != new %lu", file->offset,
 					(size_t)ret);
 		file->offset = (size_t)ret;
+		clear_read_fastpath_data(file);
 	}
 
 	return ret;

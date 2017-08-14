@@ -76,8 +76,13 @@ struct pmemfile_file {
 	/* requested/current position */
 	size_t offset;
 
+	/* current position cache, the underlying data, starting at offset */
+	const char *data_at_offset;
+	pmemfile_ssize_t data_len_at_offset;
+
 	/* current position cache, the latest block used */
 	struct pmemfile_block_desc *block_pointer_cache;
+
 
 	/* current position cache if directory */
 	struct pmemfile_dir_pos {

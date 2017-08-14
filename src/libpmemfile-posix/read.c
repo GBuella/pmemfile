@@ -42,6 +42,7 @@
 #include "libpmemfile-posix.h"
 #include "out.h"
 #include "pool.h"
+#include "read.h"
 #include "utils.h"
 
 /*
@@ -211,6 +212,160 @@ pmemfile_read(PMEMfilepool *pfp, PMEMfile *file, void *buf, size_t count)
 	return pmemfile_readv(pfp, file, &(pmemfile_iovec_t) {buf, count}, 1);
 }
 
+void
+update_read_fastpath_data(PMEMfilepool *pfp, PMEMfile *file)
+{
+	struct pmemfile_block_desc *block = file->block_pointer_cache;
+
+	if (!is_offset_in_block(block, file->offset)) {
+		clear_read_fastpath_data(file);
+		return;
+	}
+
+	if (file->vinode->inode->size <= file->offset) {
+		clear_read_fastpath_data(file);
+		return;
+	}
+
+	pmemfile_ssize_t block_end =
+		(pmemfile_ssize_t)(block->offset + block->size - file->offset);
+
+	pmemfile_ssize_t file_size =
+		(pmemfile_ssize_t)file->vinode->inode->size;
+	if (block_end > file_size)
+		block_end = file_size;
+
+	file->data_len_at_offset = block_end - (pmemfile_ssize_t)file->offset;
+
+	file->data_at_offset = NULL;
+	if ((block->flags & BLOCK_INITIALIZED) != 0)
+		file->data_at_offset = PF_RO(pfp, block->data);
+
+	if (file->data_at_offset != NULL)
+		file->data_at_offset += file->offset - block->offset;
+}
+
+void
+clear_read_fastpath_data(PMEMfile *file)
+{
+	file->data_at_offset = NULL;
+	file->data_len_at_offset = 0;
+}
+
+static pmemfile_ssize_t
+sum_iov_lens_bounded(const pmemfile_iovec_t *iov, int iovcnt,
+			pmemfile_ssize_t upper_bound)
+{
+	pmemfile_ssize_t accumulator = 0;
+
+	while (iovcnt > 0) {
+		if (((size_t)accumulator + iov->iov_len) < (size_t)accumulator)
+			return -1;
+
+		accumulator += (pmemfile_ssize_t)iov->iov_len;
+		if (accumulator > upper_bound)
+			return -1;
+		++iov;
+		--iovcnt;
+	}
+
+	return accumulator;
+}
+
+static void
+memset_zero_iov(const pmemfile_iovec_t *iov, pmemfile_ssize_t len)
+{
+	while (len > 0) {
+		pmemfile_ssize_t n = len;
+		if (n > (pmemfile_ssize_t)iov->iov_len)
+			n = (pmemfile_ssize_t)iov->iov_len;
+		memset(iov->iov_base, 0, (size_t)n);
+		len -= n;
+		++iov;
+	}
+}
+
+static void
+memcpy_to_iov(const pmemfile_iovec_t *iov,
+		const char *buf, pmemfile_ssize_t len)
+{
+	while (len > 0) {
+		pmemfile_ssize_t n = len;
+		if (n > (pmemfile_ssize_t)iov->iov_len)
+			n = (pmemfile_ssize_t)iov->iov_len;
+		memcpy(iov->iov_base, buf, (size_t)n);
+		len -= n;
+		buf += n;
+		++iov;
+	}
+}
+
+static pmemfile_ssize_t
+pmemfile_readv_fastpath_zero(PMEMfile *file,
+				const pmemfile_iovec_t *iov, int iovcnt)
+{
+	if (is_data_modification_indicated(file))
+		return -1;
+
+	pmemfile_ssize_t sum_len =
+		sum_iov_lens_bounded(iov, iovcnt, file->data_len_at_offset);
+
+	if (sum_len < 0)
+		return -1;
+
+	memset_zero_iov(iov, sum_len);
+
+	return sum_len;
+}
+
+static pmemfile_ssize_t
+pmemfile_readv_fastpath_cpy(PMEMfile *file,
+				const pmemfile_iovec_t *iov, int iovcnt)
+{
+	pmemfile_ssize_t upper_bound = file->data_len_at_offset;
+	if (upper_bound > READ_FAST_PATH_TRESHOLD)
+		upper_bound = READ_FAST_PATH_TRESHOLD;
+
+	pmemfile_ssize_t sum_len =
+		sum_iov_lens_bounded(iov, iovcnt, upper_bound);
+
+	if (sum_len > 0) {
+		char local_copy[sum_len];
+		memcpy(local_copy, file->data_at_offset, (size_t)sum_len);
+
+		if (is_data_modification_indicated(file))
+			return -1;
+
+		memcpy_to_iov(iov, local_copy, sum_len);
+	}
+
+	return sum_len;
+}
+
+static pmemfile_ssize_t
+pmemfile_readv_fastpath(PMEMfile *file,
+		const pmemfile_iovec_t *iov, int iovcnt)
+{
+	if (file->data_len_at_offset == 0)
+		return -1;
+
+	pmemfile_ssize_t result;
+
+	if (file->data_at_offset == NULL)
+		result = pmemfile_readv_fastpath_zero(file, iov, iovcnt);
+	else
+		result = pmemfile_readv_fastpath_cpy(file, iov, iovcnt);
+
+	if (result > 0) {
+		if (file->data_at_offset != NULL)
+			file->data_at_offset += result;
+		file->data_len_at_offset -= result;
+		file->offset += (size_t)result;
+	}
+
+	return result;
+}
+
 static pmemfile_ssize_t
 pmemfile_readv_under_filelock(PMEMfilepool *pfp, PMEMfile *file,
 		const pmemfile_iovec_t *iov, int iovcnt)
@@ -225,6 +380,10 @@ pmemfile_readv_under_filelock(PMEMfilepool *pfp, PMEMfile *file,
 
 	if (iovcnt == 0)
 		return 0;
+
+	ret = pmemfile_readv_fastpath(file, iov, iovcnt);
+	if (ret >= 0)
+		return ret;
 
 	ret = vinode_rdlock_with_block_tree(pfp, file->vinode);
 	if (ret != 0)
@@ -244,14 +403,16 @@ pmemfile_readv_under_filelock(PMEMfilepool *pfp, PMEMfile *file,
 	file->last_metadata_modification_observed =
 		file->vinode->metadata_modification_counter;
 
-	os_rwlock_unlock(&file->vinode->rwlock);
-
-	if (ret > 0) {
+	if (ret >= 0) {
 		file->offset += (size_t)ret;
 		file->block_pointer_cache = last_block;
+		update_read_fastpath_data(pfp, file);
 	} else {
 		file->block_pointer_cache = NULL;
+		clear_read_fastpath_data(file);
 	}
+
+	os_rwlock_unlock(&file->vinode->rwlock);
 
 	handle_atime(pfp, file->vinode, flags);
 
