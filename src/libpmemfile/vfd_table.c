@@ -692,3 +692,24 @@ pmemfile_vfd_table_init(void)
 	setup_free_slots();
 	setup_cwd();
 }
+
+void
+pmemfile_vfd_remove_all(void)
+{
+	util_mutex_lock(&vfd_table_mutex);
+
+	for (size_t vfd = 0; vfd < ARRAY_SIZE(vfd_table); ++vfd) {
+		if (vfd_table[vfd] == NULL)
+			continue;
+
+		if (vfd_table[vfd]->is_special_cwd_desc)
+			continue;
+
+		if (vf_ref_count_dec_and_fetch(vfd_table[vfd]) == 0)
+			mark_as_free_file_slot(vfd_table[vfd]);
+
+		vfd_table[vfd] = NULL;
+	}
+
+	util_mutex_unlock(&vfd_table_mutex);
+}

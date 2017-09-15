@@ -86,8 +86,30 @@ struct pool_description {
 	struct pmemfilepool *pool;
 
 	pthread_mutex_t process_switching_lock;
-	int ref_cnt;
-	bool suspended;
+
+	/*
+	 * The status field keeps track of two things:
+	 * When status == -1, the pool is suspended, and can not be resumed.
+	 * When the status field contains an ordinal, it acts as a reference
+	 * counter of a pool, which is not suspended. It is important to set
+	 * this field to -1 only while holding the process_switching_lock. Every
+	 * thread can expect this field to be non-negative after acquiring the
+	 * process_switching_lock mutex, thus it must be set to an ordinal again
+	 * once before releasing that mutex, i.e.:
+	 *
+	 *   lock(pool->process_switching_lock);
+	 *   pool->status = -1;
+	 *   suspend(pool);
+	 *   do_something_with_the_pool(pool)
+	 *   resume(pool);
+	 *   pool->status = 0;
+	 *   unlock(pool->process_switching_lock);
+	 *
+	 * Any thread that manages to atomically exchange the value of this
+	 * field from an ordinal to another ordinal doesn not need to acquire
+	 * the process_switching_lock.
+	 */
+	int status;
 
 	/* Data about the root directory inside the pmemfile pool */
 	struct stat pmem_stat;

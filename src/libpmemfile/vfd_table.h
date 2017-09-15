@@ -72,4 +72,6 @@ int pmemfile_vfd_assign(int vfd, struct pool_description *pool,
 
 int pmemfile_acquire_new_fd(const char *path);
 
+void pmemfile_vfd_remove_all(void);
+
 #endif

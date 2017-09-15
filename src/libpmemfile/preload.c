@@ -82,6 +82,8 @@
 static long log_fd = -1;
 static bool process_switching;
 
+static bool mt_flag; /* indicates multiple concurrently executing threads */
+
 static void
 log_init(const char *path, const char *trunc)
 {
@@ -136,25 +138,150 @@ static int pool_count;
 #define RWF_SYNC 0x00000004
 #endif
 
+
+
+static int
+pool_fetch_status(struct pool_description *pool)
+{
+	return __atomic_load_n(&pool->status, __ATOMIC_ACQUIRE);
+}
+
+static void
+pool_set_status(struct pool_description *pool, int value)
+{
+	__atomic_store_n(&pool->status, value, __ATOMIC_RELEASE);
+}
+
+
+/*
+ * pool_try_xchg_status
+ * Opposite of pool_try_set_unavailable_status, tries to set the status field
+ * from original to desired.
+ * Returns the new value, i.e. desired if it succeeded.
+ */
+static int
+pool_try_xchg_status(struct pool_description *pool, int expected,
+				int desired)
+{
+	if (__atomic_compare_exchange_n(&pool->status, &original, desired,
+					false,
+					__ATOMIC_SEQ_CST,
+					__ATOMIC_RELAXED)) {
+			return desired;
+	}
+
+	return original;
+}
+
+/*
+ * pool_try_increment_ref_cnt ; pool_increment_ref_cnt ; pool_decrement_ref_cnt
+ * These three utility functions are meant to be used in pool_acquire and in
+ * pool_release -- not while suspending during fork handling.
+ */
+
+/*
+ * If the status was greater than zero originally, there is no need
+ * hold a lock to acquire the pool.
+ * Thus, incrementing the status from a positive integer succeds here.
+ */
+static int
+pool_try_increment_ref_cnt(struct pool_description *pool)
+{
+	int cnt = pool_fetch_status(pool);
+
+	while (cnt >= 0) {
+		int new_cnt = pool_try_xchg_status(pool, cnt, cnt + 1);
+		if (new_count == cnt + 1)
+			return new_count;
+	}
+
+	return cnt;
+}
+
+static int
+pool_try_decrement_ref_cnt(struct pool_description *pool)
+{
+	if (!process_switching) {
+		/*
+		 * The status must be larger than zero, and it can freely be
+		 * decremented. There is nothing else to do, even if the status
+		 * reaches zero here.
+		 */
+		return __atomic_sub_fetch(&pool->status, 1, __ATOMIC_SEQ_CST);
+	}
+
+	/*
+	 * But if process switching is on, the status can't just be
+	 * decremented from 1 to zero.
+	 *
+	 */
+	int cnt = __atomic_load_n(&pool->status, __ATOMIC_RELAXED);
+
+	assert(cnt > 0);
+
+	while (cnt > 1) {
+		int new_count = cnt - 1;
+		if (__atomic_compare_exchange_n(&pool->status, &cnt, new_count,
+						false,
+						__ATOMIC_SEQ_CST,
+						__ATOMIC_RELAXED))
+			return new_count;
+	}
+
+	return cnt;
+}
+
+
+/*
+ * Must be called while holding the mutex corresponding to the pool. The 
+ * original value of status can't be negative (only the fork handler
+ * set it to that, but that holds the mutex while that).
+ * But the original value can be zero here.
+ */
+static void
+pool_increment_ref_cnt_after_resume(struct pool_description *pool)
+{
+	int cnt;
+
+	cnt = __atomic_fetch_add(&pool->status, 1, __ATOMIC_SEQ_CST);
+	if (cnt == 0)
+		(void) __atomic_fetch_add(&pool->status, 1, __ATOMIC_SEQ_CST);
+}
+
 /*
  * pool_acquire -- acquires access to pool
  */
 void
 pool_acquire(struct pool_description *pool)
 {
-	if (!process_switching)
+	if (pool_try_increment_ref_cnt(pool) > 0) {
+		/*
+		 * Fast path.
+		 *
+		 * The status integer was non-negative already, pool was
+		 * not suspended, no need to lock.
+		 */
 		return;
+	}
 
+
+	/*
+	 * Slow path.
+	 */
+
+	int oerrno = errno;
 	util_mutex_lock(&pool->process_switching_lock);
-	pool->ref_cnt++;
 
-	if (pool->ref_cnt == 1 && pool->suspended) {
+	if (pool->suspended) {
 		if (pmemfile_pool_resume(pool->pool, pool->poolfile_path))
 			FATAL("could not restore pmemfile pool");
 		pool->suspended = false;
 	}
 
+	pool_increment_ref_cnt_after_resume(pool);
+
 	util_mutex_unlock(&pool->process_switching_lock);
+	errno = oerrno;
 }
 
 /*
@@ -163,23 +290,124 @@ pool_acquire(struct pool_description *pool)
 void
 pool_release(struct pool_description *pool)
 {
-	if (!process_switching)
+	int status = __atomic_fetch_sub(&pool->status, 1, __ATOMIC_SEQ_CST);
+
+	if (status > 0 || !process_switching) {
+		/*
+		 * Fast path.
+		 *
+		 * No need to suspend the pool, so there is nothing
+		 * else left to do.
+		 */
 		return;
+	}
+
+	/*
+	 * Slow path.
+	 *
+	 * The mutex needs to be taken only when process_switching is on,
+	 * and there might be no other reference to the pool_description.
+	 */
 
 	int oerrno = errno;
-
 	util_mutex_lock(&pool->process_switching_lock);
-	pool->ref_cnt--;
 
-	if (pool->ref_cnt == 0 && !pool->suspended) {
+	assert(status == 0);
+
+	if (__atomic_compare_exchange_n(&pool->status, &status, -1,
+					false,
+					__ATOMIC_SEQ_CST,
+					__ATOMIC_RELAXED)) {
+		assert(!pool->suspended);
 		if (pmemfile_pool_suspend(pool->pool))
 			FATAL("could not suspend pmemfile pool");
 		pool->suspended = true;
 	}
 
 	util_mutex_unlock(&pool->process_switching_lock);
-
 	errno = oerrno;
+}
+
+static void
+reacquire_all_pools(void)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(pools); ++i) {
+		struct pool_description *pool = pools + i;
+
+		if (pool->pool == NULL)
+			continue;
+
+		util_mutex_lock(&pool->process_switching_lock);
+
+		if (pool_fetch_status(pool) == -1) {
+			/*
+			 * The value -1 means no other thread can modify
+			 * pool->field without holding the lock, which this
+			 * thread already holds.
+			 */
+			assert(pool->poolfile_path != NULL);
+
+			if (pmemfile_pool_resume(pool->pool, pool->poolfile_path))
+				FATAL("could not restore pmemfile pool");
+
+			/*
+			 * Set status to zero, with __ATOMIC_RELEASE semantics.
+			 * Other threads can expect the pool to be usable from
+			 * this point on, and not suspended.
+			 */
+			pool_set_status(pool, 0);
+		}
+
+		util_mutex_unlock(&pool->process_switching_lock);
+	}
+}
+
+static int
+release_all_pools(void)
+{
+	int ret = 0;
+
+	for (size_t i = 0; i < ARRAY_SIZE(pools) && ret == 0; ++i) {
+		struct pool_description *pool = pools + i;
+
+		if (pool->pool == NULL)
+			continue; /* nothing loaded here */
+
+		if (pool_fetch_status(pool) == -1)
+			continue; /* pool already suspended */
+
+		util_mutex_lock(&pool->process_switching_lock);
+
+		if (pool_try_xchg_status(pool, 0, -1) == -1) {
+			/*
+			 * Managed to set the status field from zero to -1.
+			 * Since it was zero, no other thread was using it.
+			 * Also, no other thread can modify pool->status as long
+			 * as the mutex is being held by this thread. If other
+			 * threads would like access to the pool, they have to
+			 * wait - by calling util_mutex_lock.
+			 */
+			if (!pool->suspended) {
+				if (pmemfile_pool_suspend(pool->pool))
+					FATAL("could not suspend pmemfile pool");
+				pool->suspended = true;
+			}
+		} else {
+			/*
+			 * The pool->status field was 
+			 *
+			 *
+			 */
+			ret = -1; /* pool is in use */
+		}
+
+		util_mutex_unlock(&pool->process_switching_lock);
+	}
+
+	if (ret != 0 && !process_switching)
+		reacquire_all_pools();
+
+	return ret;
 }
 
 /*
@@ -2060,6 +2288,42 @@ lookup_pd_by_inode(struct stat *stat)
 	return NULL;
 }
 
+static bool
+is_fork(long syscall_number, long arg0)
+{
+	static const int fork_flags = CLONE_CHILD_CLEARTID | CLONE_CHILD_SETTID;
+
+	return (syscall_number == SYS_clone) &&
+	    ((arg0 & fork_flags) == fork_flags);
+}
+
+static void
+hook_fork(long syscall_number,
+			long arg0, long arg1,
+			long arg2, long arg3,
+			long arg4, long arg5,
+			long *syscall_return_value)
+{
+	if (mt_flag) {
+		*syscall_return_value = EAGAIN;
+		return;
+	}
+
+	if (release_all_pools() != 0) {
+		*syscall_return_value = EAGAIN;
+		return;
+	}
+
+	*syscall_return_value = syscall_no_intercept(syscall_number,
+	    arg0, arg1, arg2, arg3, arg4, arg5);
+
+	if (*syscall_return_value == 0)
+		pmemfile_vfd_remove_all();
+
+	if (!process_switching)
+		reacquire_all_pools();
+}
+
 /*
  * Return values expected by libsyscall_intercept:
  * A non-zero return value if it should execute the syscall,
@@ -2076,6 +2340,14 @@ hook(const struct syscall_early_filter_entry *filter_entry, long syscall_number,
 			long arg4, long arg5,
 			long *syscall_return_value)
 {
+	if (is_fork(syscall_number, arg0)) {
+		hook_fork(syscall_number,
+		    arg0, arg1, arg2, arg3, arg4, arg5,
+		    syscall_return_value);
+
+		return HOOKED;
+	}
+
 	if (syscall_number == SYS_chdir) {
 		*syscall_return_value = hook_chdir((const char *)arg0);
 		return HOOKED;
@@ -2163,6 +2435,11 @@ hook_reentrance_guard_wrapper(long syscall_number,
 				long arg4, long arg5,
 				long *syscall_return_value)
 {
+	if (syscall_number == SYS_clone && (arg1 & CLONE_VM) == CLONE_VM) {
+		mt_flag = true;
+		return NOT_HOOKED;
+	}
+
 	if (guard_flag)
 		return NOT_HOOKED;
 
@@ -2359,7 +2636,7 @@ open_pool_at_startup(struct pool_description *pool_desc)
 	if (process_switching) {
 		/*
 		 * Give up access to the pool. We have to acquire it
-		 * first because ref_cnt == 0 and suspended == false.
+		 * first because status == 0 and suspended == false.
 		 */
 		pool_acquire(pool_desc);
 		pool_release(pool_desc);
