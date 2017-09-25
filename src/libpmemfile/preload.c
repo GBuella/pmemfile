@@ -82,6 +82,8 @@
 static long log_fd = -1;
 static bool process_switching;
 
+static bool mt_flag; /* indicates multiple concurrently executing threads */
+
 static void
 log_init(const char *path, const char *trunc)
 {
@@ -2069,13 +2071,54 @@ lookup_pd_by_inode(struct stat *stat)
 #define NOT_HOOKED 1
 #define HOOKED 0
 
+static bool
+is_fork(long syscall_number, long arg0)
+{
+	if (syscall_number != SYS_clone)
+		return false;
+
+	if ((arg0 & CLONE_VM) == CLONE_VM)
+		return false;
+
+	if ((arg0 & CLONE_VFORK) == CLONE_VFORK)
+		return false;
+
+	return true;
+}
+
+static void
+suspende_all_pools(void)
+{
+	/* XXX to be done */
+}
+
+static long
+pre_fork(long syscall_number,
+		long arg0, long arg1,
+		long arg2, long arg3,
+		long arg4, long arg5)
+{
+	if (mt_flag)
+		return EAGAIN;
+
+	suspende_all_pools();
+
+	return syscall_no_intercept(syscall_number,
+				    arg0, arg1, arg2, arg3, arg4, arg5);
+}
+
 static int
 hook(const struct syscall_early_filter_entry *filter_entry, long syscall_number,
-			long arg0, long arg1,
-			long arg2, long arg3,
-			long arg4, long arg5,
-			long *syscall_return_value)
+	long arg0, long arg1, long arg2, long arg3, long arg4, long arg5,
+	long *syscall_return_value)
 {
+	if (is_fork(syscall_number, arg0)) {
+		*syscall_return_value =
+		    pre_fork(syscall_number,
+			arg0, arg1, arg2, arg3, arg4, arg5);
+		return HOOKED;
+	}
+
 	if (syscall_number == SYS_chdir) {
 		*syscall_return_value = hook_chdir((const char *)arg0);
 		return HOOKED;
@@ -2163,6 +2206,11 @@ hook_reentrance_guard_wrapper(long syscall_number,
 				long arg4, long arg5,
 				long *syscall_return_value)
 {
+	if (syscall_number == SYS_clone && (arg1 & CLONE_VM) == CLONE_VM) {
+		mt_flag = true;
+		return NOT_HOOKED;
+	}
+
 	if (guard_flag)
 		return NOT_HOOKED;
 
