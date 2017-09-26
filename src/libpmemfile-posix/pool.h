@@ -49,8 +49,9 @@ struct pmemfilepool {
 
 	pmemfile_dev_t dev;
 
-	/* root directory */
-	struct pmemfile_vinode *root;
+	/* root directories, the default one is chosen when opening the pool */
+	struct pmemfile_vinode *root[PMEMFILE_NAMESPACE_COUNT];
+	struct pmemfile_vinode *default_root;
 	mode_t umask;
 
 	/* current working directory */

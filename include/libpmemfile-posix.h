@@ -208,6 +208,8 @@ PMEMfilepool *pmemfile_pool_create(const char *pathname, size_t poolsize,
 		pmemfile_mode_t mode);
 
 PMEMfilepool *pmemfile_pool_open(const char *pathname);
+PMEMfilepool *pmemfile_pool_open_at_namespace(const char *pathname,
+					      unsigned namespace_index);
 void pmemfile_pool_close(PMEMfilepool *pfp);
 void pmemfile_pool_set_device(PMEMfilepool *pfp, pmemfile_dev_t dev);
 

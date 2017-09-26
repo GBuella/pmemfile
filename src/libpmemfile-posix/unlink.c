@@ -66,16 +66,17 @@ vinode_unlink_file(PMEMfilepool *pfp,
 	TOID(struct pmemfile_inode) tinode = dirent->inode;
 	struct pmemfile_inode *inode = PF_RW(pfp, tinode);
 
-	ASSERT(inode->nlink > 0);
+	unsigned ni = parent->inode->namespace_index;
+	ASSERT(inode->nlink[ni] > 0);
 
-	TX_ADD_DIRECT(&inode->nlink);
+	TX_ADD_DIRECT(&inode->nlink + ni);
 	/*
 	 * Snapshot inode and the first byte of a name (because we are going
 	 * to overwrite just one byte) using one call.
 	 */
 	pmemobj_tx_add_range_direct(dirent, sizeof(dirent->inode) + 1);
 
-	if (--inode->nlink > 0) {
+	if (--inode->nlink[ni] > 0) {
 		/*
 		 * From "stat" man page:
 		 * "The field st_ctime is changed by writing or by setting inode

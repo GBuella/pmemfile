@@ -231,7 +231,7 @@ _pmemfile_openat(PMEMfilepool *pfp, struct pmemfile_vinode *dir,
 		namelen = component_length(info.remaining);
 
 		if (namelen == 0) {
-			ASSERT(vparent == pfp->root);
+			ASSERT(vinode_is_root(vparent));
 			vinode = vinode_ref(pfp, vparent);
 		} else {
 			vinode = vinode_lookup_dirent(pfp, info.parent,

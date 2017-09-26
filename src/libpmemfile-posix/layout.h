@@ -53,6 +53,8 @@ POBJ_LAYOUT_TOID(pmemfile, struct pmemfile_inode_array);
 POBJ_LAYOUT_TOID(pmemfile, char);
 POBJ_LAYOUT_END(pmemfile);
 
+#define PMEMFILE_NAMESPACE_COUNT 4
+
 #define METADATA_BLOCK_SIZE 4096
 
 struct pmemfile_block_desc {
@@ -149,10 +151,12 @@ struct pmemfile_time {
 				- 16 /* atime */ \
 				- 16 /* ctime */ \
 				- 16 /* mtime */ \
-				- 8  /* nlink */ \
+				- 8 * PMEMFILE_NAMESPACE_COUNT /* nlink */ \
 				- 8  /* size */ \
 				- 8  /* allocated space */ \
-				- 8  /* flags */)
+				- 8  /* flags */ \
+				- 4  /* namespace_index */ \
+				- 4  /* padding */)
 
 /* Inode */
 struct pmemfile_inode {
@@ -165,12 +169,6 @@ struct pmemfile_inode {
 	/* group */
 	uint32_t gid;
 
-	/*
-	 * Number of references from processes that called
-	 * pmemfile_pool_suspend.
-	 */
-	uint32_t suspended_references;
-
 	/* time of last access */
 	struct pmemfile_time atime;
 
@@ -181,7 +179,7 @@ struct pmemfile_inode {
 	struct pmemfile_time mtime;
 
 	/* hard link counter */
-	uint64_t nlink;
+	uint64_t nlink[PMEMFILE_NAMESPACE_COUNT];
 
 	/* size of file */
 	uint64_t size;
@@ -191,6 +189,8 @@ struct pmemfile_inode {
 
 	/* file flags */
 	uint64_t flags;
+
+	uint32_t namespace_index;
 
 	/* data! */
 	union {
@@ -251,19 +251,15 @@ struct pmemfile_super {
 	uint64_t version;
 
 	/* root directory inode */
-	TOID(struct pmemfile_inode) root_inode;
+	TOID(struct pmemfile_inode) root_inode[PMEMFILE_NAMESPACE_COUNT];
 
 	/* list of arrays of inodes that were deleted, but are still opened */
 	TOID(struct pmemfile_inode_array) orphaned_inodes;
 
-	/* list of arrays of inodes that are suspended */
-	TOID(struct pmemfile_inode_array) suspended_inodes;
-
 	char padding[PMEMFILE_SUPER_SIZE
 			- 8  /* version */
-			- 16 /* toid */
-			- 16 /* toid */
-			- 16 /* toid */];
+			- 16 * PMEMFILE_NAMESPACE_COUNT /* toid array */
+			- 16 /* orphaned_inodes toid */];
 };
 
 COMPILE_ERROR_ON(sizeof(struct pmemfile_super) != PMEMFILE_SUPER_SIZE);

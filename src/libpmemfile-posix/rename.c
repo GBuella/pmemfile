@@ -77,11 +77,13 @@ vinode_update_parent(PMEMfilepool *pfp,
 	ASSERT(TOID_EQUALS(dirent->inode, src_parent->tinode));
 	ASSERTeq(vinode->parent, src_parent);
 
-	TX_ADD_DIRECT(&src_parent->inode->nlink);
-	src_parent->inode->nlink--;
+	unsigned ni = vinode->inode->namespace_index;
 
-	TX_ADD_DIRECT(&dst_parent->inode->nlink);
-	dst_parent->inode->nlink++;
+	TX_ADD_DIRECT(&src_parent->inode->nlink + ni);
+	src_parent->inode->nlink[ni]--;
+
+	TX_ADD_DIRECT(&dst_parent->inode->nlink + ni);
+	dst_parent->inode->nlink[ni]++;
 
 	TX_ADD_DIRECT(&dirent->inode);
 	dirent->inode = dst_parent->tinode;
@@ -116,10 +118,64 @@ vinode_exchange(PMEMfilepool *pfp,
 		src_info->dirent->inode = dst_info->vinode->tinode;
 		dst_info->dirent->inode = src_info->vinode->tinode;
 
+		unsigned src_ni = src_info->vinode->inode->namespace_index;
+		unsigned dst_ni = dst_info->vinode->inode->namespace_index;
+		unsigned srcp_ni = src_info->vinode->parent->inode->namespace_index;
+		unsigned dstp_ni = dst_info->vinode->parent->inode->namespace_index;
+
 		/*
-		 * If both are regular files or have the same parent, then
-		 * we don't have to do anything.
+		 * If src and dst are in different namespaces, or at least one
+		 * of them is a directory
 		 */
+		if (src->parent != dst->parent || src_ni != dst_ni) {
+			if (src_is_dir) {
+				/*
+				 * The ".." entry in src does not refer the
+				 * src->parent anymore.
+				 */
+				TX_ADD_DIRECT(src->parent->inode->nlink + src_ni);
+				src->parent->inode->nlink[src_ni]--;
+
+				struct pmemfile_dirent *dirent =
+					vinode_lookup_dirent_by_name_locked(pfp,
+						src_info->vinode, "..", 2);
+				TX_ADD_DIRECT(&dirent->inode);
+				dirent->inode = dst->parent->tinode;
+				src_info->vinode->parent = dst->parent;
+
+				/*
+				 * The ".." entry in src refers to the dst->parent
+				 */
+				TX_ADD_DIRECT(dst->parent->inode->nlink + src_ni);
+				dst->parent->inode->nlink[src_ni]++;
+			}
+
+			if (dst_is_dir) {
+				/*
+				 * The ".." entry in dst does not refer the
+				 * dst->parent anymore.
+				 */
+				TX_ADD_DIRECT(dst->parent->inode->nlink + dst_ni);
+				dst->parent->inode->nlink[dst_ni]--;
+
+				struct pmemfile_dirent *dirent =
+					vinode_lookup_dirent_by_name_locked(pfp,
+						dst_info->vinode, "..", 2);
+				TX_ADD_DIRECT(&dirent->inode);
+				dirent->inode = src->parent->tinode;
+				dst_info->vinode->parent = src->parent;
+
+				/*
+				 * The ".." entry in dst refers to the src->parent
+				 */
+				TX_ADD_DIRECT(src->parent->inode->nlink + dst_ni);
+				src->parent->inode->nlink[dst_ni]++;
+			}
+		}
+
+
+
+
 		if ((src_is_dir || dst_is_dir) && src->parent != dst->parent) {
 			/*
 			 * If only one of them is a directory, then we have to

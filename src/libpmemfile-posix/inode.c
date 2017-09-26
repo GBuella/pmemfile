@@ -218,9 +218,7 @@ vinode_unref(PMEMfilepool *pfp, struct pmemfile_vinode *vinode)
 		struct pmemfile_vinode *parent = NULL;
 
 		if (__sync_sub_and_fetch(&vinode->ref, 1) == 0) {
-			uint64_t nlink = vinode->inode->nlink;
-			if (vinode->inode->suspended_references == 0 &&
-					nlink == 0)
+			if (vinode->inode->nlink == 0)
 				vinode_free_pmem(pfp, vinode);
 
 			to_unregister = vinode;
@@ -232,7 +230,7 @@ vinode_unref(PMEMfilepool *pfp, struct pmemfile_vinode *vinode)
 			parent = vinode->parent;
 		}
 
-		if (vinode != pfp->root)
+		if (!vinode_is_root(vinode))
 			vinode = parent;
 		else
 			vinode = NULL;
@@ -302,7 +300,7 @@ inode_alloc(PMEMfilepool *pfp, struct pmemfile_cred *cred, uint64_t flags)
 	inode->ctime = t;
 	inode->mtime = t;
 	inode->atime = t;
-	inode->nlink = 0;
+	memset(inode->nlink, 0, sizeof(inode->nlink));
 	inode->uid = cred->euid;
 	inode->gid = cred->egid;
 
@@ -340,9 +338,6 @@ vinode_orphan_unlocked(PMEMfilepool *pfp, struct pmemfile_vinode *vinode)
 
 	ASSERT_IN_TX();
 	ASSERTeq(vinode->orphaned.arr, NULL);
-
-	if (vinode->inode->suspended_references > 0)
-		return;
 
 	TOID(struct pmemfile_inode_array) orphaned =
 			pfp->super->orphaned_inodes;
@@ -713,13 +708,6 @@ vinode_rdlock_with_block_tree(PMEMfilepool *pfp, struct pmemfile_vinode *vinode)
 void
 vinode_suspend(PMEMfilepool *pfp, struct pmemfile_vinode *vinode)
 {
-	TX_ADD_DIRECT(&vinode->inode->suspended_references);
-	vinode->inode->suspended_references++;
-
-	_inode_array_add(pfp, pfp->super->suspended_inodes, vinode->tinode,
-			&vinode->suspended.arr, &vinode->suspended.idx,
-			INODE_ARRAY_NOLOCK);
-
 	if (vinode->blocks) {
 		ctree_delete(vinode->blocks);
 		vinode->blocks = NULL;
@@ -755,11 +743,6 @@ inode_resume(PMEMfilepool *pfp, struct pmemfile_vinode *vinode,
 		suspended.arr = add_off(suspended.arr, diff);
 		inode = add_off(inode, diff);
 	}
-
-	ASSERT(inode->suspended_references > 0);
-
-	TX_ADD_DIRECT(&inode->suspended_references);
-	inode->suspended_references--;
 
 	_inode_array_unregister(pfp, suspended.arr, suspended.idx,
 			INODE_ARRAY_NOLOCK);

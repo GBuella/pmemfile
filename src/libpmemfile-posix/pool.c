@@ -55,13 +55,34 @@
 
 #define PMEMFILE_CUR_VERSION \
 	PMEMFILE_SUPER_VERSION(PMEMFILE_MAJOR_VERSION, PMEMFILE_MINOR_VERSION)
+
 /*
- * initialize_super_block -- initializes super block
+ * initialize_super_block -- initializes super block on medium.
  *
+ * Must be called in a transaction.
+ */
+static void
+initialize_super_block(PMEMfilepool *pfp, struct pmemfile_cred *cred)
+{
+	TX_ADD_DIRECT(pfp->super);
+
+	for (unsigned i = 0; i < PMEMFILE_NAMESPACE_COUNT; ++i)
+		pfp->super->root_inode[i] = vinode_new_dir(pfp, NULL, "/", 1,
+						cred, PMEMFILE_ACCESSPERMS);
+
+	pfp->super->version = PMEMFILE_CUR_VERSION;
+	pfp->super->orphaned_inodes = inode_array_alloc(pfp);
+}
+
+/*
+ * initialize_super_block_runtime -- initializes super block
+ *
+ * The super block might have already been initialized, but some runtime state
+ * must be set up before use nonetheless.
  * Can't be called in a transaction.
  */
 static int
-initialize_super_block(PMEMfilepool *pfp)
+initialize_super_block_runtime(PMEMfilepool *pfp)
 {
 	LOG(LDBG, "pfp %p", pfp);
 
@@ -70,7 +91,7 @@ initialize_super_block(PMEMfilepool *pfp)
 	int error = 0;
 	struct pmemfile_super *super = pfp->super;
 
-	if (!TOID_IS_NULL(super->root_inode) &&
+	if (!TOID_IS_NULL(super->root_inode[0]) &&
 			super->version != PMEMFILE_CUR_VERSION) {
 		ERR("unknown superblock version: 0x%lx", super->version);
 		errno = EINVAL;
@@ -101,15 +122,9 @@ initialize_super_block(PMEMfilepool *pfp)
 		goto inode_map_alloc_fail;
 	}
 
-	if (TOID_IS_NULL(super->root_inode)) {
+	if (TOID_IS_NULL(super->root_inode[0])) {
 		TX_BEGIN_CB(pfp->pop, cb_queue, pfp) {
-			TX_ADD_DIRECT(super);
-			super->root_inode = vinode_new_dir(pfp, NULL, "/", 1,
-					&cred, PMEMFILE_ACCESSPERMS);
-
-			super->version = PMEMFILE_CUR_VERSION;
-			super->orphaned_inodes = inode_array_alloc(pfp);
-			super->suspended_inodes = inode_array_alloc(pfp);
+			initialize_super_block(pfp, &cred);
 		} TX_ONABORT {
 			error = errno;
 		} TX_END
@@ -120,22 +135,25 @@ initialize_super_block(PMEMfilepool *pfp)
 		}
 	}
 
-	pfp->root = inode_ref(pfp, super->root_inode, NULL, NULL, 0);
-	if (!pfp->root) {
-		error = errno;
+	for (unsigned i = 0; i < PMEMFILE_NAMESPACE_COUNT; ++i) {
+		pfp->root[i] =
+		    inode_ref(pfp, super->root_inode[i], NULL, NULL, 0);
 
-		ERR("!cannot access root inode");
-		goto ref_err;
+		if (!pfp->root[i]) {
+			error = errno;
+
+			ERR("!cannot access root inode");
+			goto ref_err;
+		}
+		pfp->root[i]->parent = pfp->root[i];
+#ifdef DEBUG
+		pfp->root[i]->path = strdup("/");
+		ASSERTne(pfp->root[i]->path, NULL);
+#endif
 	}
 
-	pfp->root->parent = pfp->root;
-#ifdef DEBUG
-	pfp->root->path = strdup("/");
-	ASSERTne(pfp->root->path, NULL);
-#endif
-
-	pfp->cwd = vinode_ref(pfp, pfp->root);
-	pfp->dev = pfp->root->tinode.oid.pool_uuid_lo;
+	pfp->cwd = vinode_ref(pfp, pfp->root[0]);
+	pfp->dev = pfp->root[0]->tinode.oid.pool_uuid_lo;
 	cred_release(&cred);
 
 	return 0;
@@ -184,10 +202,12 @@ pmemfile_pool_create(const char *pathname, size_t poolsize,
 	}
 	pfp->super = PF_RW(pfp, super);
 
-	if (initialize_super_block(pfp)) {
+	if (initialize_super_block_runtime(pfp)) {
 		error = errno;
 		goto init_failed;
 	}
+
+	pfp->default_root = pfp->root[0];
 
 	return pfp;
 
@@ -215,12 +235,18 @@ inode_free_cb(PMEMfilepool *pfp, TOID(struct pmemfile_inode) inode)
 }
 
 /*
- * pmemfile_pool_open -- open pmem file system
+ * pool_open -- open pmem file system
+ * The default namespace is chosen with the second argument.
  */
-PMEMfilepool *
-pmemfile_pool_open(const char *pathname)
+static PMEMfilepool *
+pool_open(const char *pathname, unsigned namespace_index)
 {
-	LOG(LDBG, "pathname %s", pathname);
+	if (namespace_index >= PMEMFILE_NAMESPACE_COUNT) {
+		errno = ENODEV;
+		return NULL;
+	}
+
+	LOG(LDBG, "pathname %s namespace %u", pathname, namespace_index);
 
 	PMEMfilepool *pfp = pf_calloc(1, sizeof(*pfp));
 	if (!pfp)
@@ -242,7 +268,7 @@ pmemfile_pool_open(const char *pathname)
 	}
 	pfp->super = pmemobj_direct(super);
 
-	if (initialize_super_block(pfp)) {
+	if (initialize_super_block_runtime(pfp)) {
 		error = errno;
 		goto init_failed;
 	}
@@ -266,6 +292,8 @@ pmemfile_pool_open(const char *pathname)
 		} TX_END
 	}
 
+	pfp->default_root = pfp->root[namespace_index];
+
 	return pfp;
 
 init_failed:
@@ -275,6 +303,26 @@ pool_open:
 	pf_free(pfp);
 	errno = error;
 	return NULL;
+}
+
+/*
+ * pmemfile_pool_open -- open pmem file system
+ * The default namespace is set to namespace #0
+ */
+PMEMfilepool *
+pmemfile_pool_open(const char *pathname)
+{
+	return pool_open(pathname, 0);
+}
+
+/*
+ * pmemfile_pool_open -- open pmem file system
+ * This interface allows the user to choose the default namespace.
+ */
+PMEMfilepool *
+pmemfile_pool_open_at_namespace(const char *pathname, unsigned index)
+{
+	return pool_open(pathname, index);
 }
 
 /*
@@ -297,7 +345,8 @@ pmemfile_pool_close(PMEMfilepool *pfp)
 	pf_free(pfp->cred.groups);
 
 	vinode_unref(pfp, pfp->cwd);
-	vinode_unref(pfp, pfp->root);
+	for (unsigned i = 0; i < PMEMFILE_NAMESPACE_COUNT; ++i)
+		vinode_unref(pfp, pfp->root[i]);
 	inode_map_free(pfp);
 	os_rwlock_destroy(&pfp->cred_rwlock);
 	os_rwlock_destroy(&pfp->super_rwlock);
