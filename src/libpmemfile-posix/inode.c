@@ -232,7 +232,7 @@ vinode_unref(PMEMfilepool *pfp, struct pmemfile_vinode *vinode)
 			parent = vinode->parent;
 		}
 
-		if (vinode != pfp->root)
+		if (!vinode_is_root(vinode))
 			vinode = parent;
 		else
 			vinode = NULL;
