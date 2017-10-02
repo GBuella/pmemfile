@@ -37,6 +37,7 @@
 #include <inttypes.h>
 
 #include "callbacks.h"
+#include "data.h"
 #include "dir.h"
 #include "libpmemfile-posix.h"
 #include "out.h"
@@ -94,6 +95,58 @@ vinode_unlink_file(PMEMfilepool *pfp,
 	dirent->inode = TOID_NULL(struct pmemfile_inode);
 }
 
+static TOID(struct pmemfile_inode)
+parse_inode_toid(PMEMfilepool *pfp, const char *buf)
+{
+	if (strchr(buf, '\n') != buf + SUSPENDED_INODE_LINE_LENGTH - 1)
+		return TOID_NULL(struct pmemfile_inode);
+
+	uint64_t raw[2];
+	TOID(struct pmemfile_inode) result;
+	COMPILE_ERROR_ON(sizeof(result) != sizeof(raw));
+
+	char *endptr;
+
+	buf += 2; /* "0x" */
+	uintmax_t n = strtoumax(buf, &endptr, 16);
+	if (n == 0 || n >= UINT64_MAX || *endptr != ':')
+		return TOID_NULL(struct pmemfile_inode);
+
+	++buf; /* ":" */
+
+	raw[0] = (uint64_t)n;
+
+	n = strtoumax(buf, &endptr, 16);
+	if (n == 0 || n >= UINT64_MAX || *endptr != ':')
+		return TOID_NULL(struct pmemfile_inode);
+
+	raw[1] = (uint64_t)n;
+
+	memcpy(&result, raw, sizeof(result));
+
+	return result;
+}
+
+static void
+decrement_susp_ref_counts(PMEMfilepool *pfp, struct pmemfile_vinode *vinode)
+{
+	char line[SUSPENDED_INODE_LINE_LENGTH];
+
+	size_t r = vinode_read(pfp, vinode, offset, SUSPENSE_LINE_SIZE,
+			&desc->last_block, line, sizeof(line));
+
+	if (r != sizeof(line))
+		pmemobj_tx_abort(EINVAL);
+
+	TOID(struct pmemfile_inode) tinode = parse_inode_toid(pfp, line);
+
+	TX_ADD_DIRECT(&inode->suspended_references);
+	inode->suspended_references--;
+
+	_inode_array_unregister(pfp, suspended.arr, suspended.idx,
+			INODE_ARRAY_NOLOCK);
+}
+
 static int
 _pmemfile_unlinkat(PMEMfilepool *pfp, struct pmemfile_vinode *dir,
 		const char *pathname)
@@ -145,21 +198,38 @@ _pmemfile_unlinkat(PMEMfilepool *pfp, struct pmemfile_vinode *dir,
 
 	ASSERT_NOT_IN_TX();
 
+
 	struct pmemfile_time t;
 	if (get_current_time(&t)) {
 		error = errno;
 		goto end_vinode;
 	}
 
-	TX_BEGIN_CB(pfp->pop, cb_queue, pfp) {
-		vinode_unlink_file(pfp, info.parent, dirent_info.dirent,
-				dirent_info.vinode, t);
+	bool is_special_suspended_refs_inode =
+	    inode_has_suspended_refs(dirent_info.vinode->inode);
 
-		if (dirent_info.vinode->inode->nlink == 0)
-			vinode_orphan(pfp, dirent_info.vinode);
+	if (is_special_suspended_refs_inode)
+		util_rwlock_wrlock(&pfp->super_rwlock);
+
+	TX_BEGIN_CB(pfp->pop, cb_queue, pfp) {
+		struct pmemfile_vinode *vinode = dirent_info.vinode;
+		vinode_unlink_file(pfp, info.parent, dirent_info.dirent,
+				vinode, t);
+
+		if (vinode->inode->nlink == 0) {
+			if (is_special_suspended_refs_inode) {
+				decrement_susp_ref_counts(pfp, vinode);
+				vinode_orphan_unlocked(pfp, dirent_info.vinode);
+			} else {
+				vinode_orphan(pfp, dirent_info.vinode);
+			}
+		}
 	} TX_ONABORT {
 		error = errno;
 	} TX_END
+
+	if (is_special_suspended_refs_inode)
+		util_rwlock_unlock(&pfp->super_rwlock);
 
 end_vinode:
 	vinode_unlock2(dirent_info.vinode, info.parent);

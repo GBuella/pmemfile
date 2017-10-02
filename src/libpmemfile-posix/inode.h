@@ -137,6 +137,11 @@ static inline bool vinode_is_root(struct pmemfile_vinode *vinode)
 	return vinode_is_dir(vinode) && vinode->parent == vinode;
 }
 
+static inline bool inode_has_suspended_refs(const struct pmemfile_inode *inode)
+{
+	return (inode->flags & PMEMFILE_I_SUSPENDED_REF) != 0;
+}
+
 struct pmemfile_cred;
 TOID(struct pmemfile_inode) inode_alloc(PMEMfilepool *pfp,
 		struct pmemfile_cred *cred, uint64_t flags);
@@ -186,10 +191,12 @@ blockp_as_oid(struct pmemfile_block_desc *block)
 
 int vinode_rdlock_with_block_tree(PMEMfilepool *, struct pmemfile_vinode *);
 
-void vinode_suspend(PMEMfilepool *pfp, struct pmemfile_vinode *vinode);
-void inode_resume(PMEMfilepool *pfp, struct pmemfile_vinode *vinode,
-		PMEMobjpool *old_pop);
+void vinode_suspend(PMEMfilepool *pfp, struct pmemfile_vinode *vinode,
+		    unsigned count);
 void vinode_resume(PMEMfilepool *pfp, struct pmemfile_vinode *vinode,
 		PMEMobjpool *old_pop);
+
+/*        "0x" pool_uuid ":" "0x" offset "\n" */
+#define SUSPENDED_INODE_LINE_LENGTH (2 + 16 + 1 + 2 + 16 + 1)
 
 #endif

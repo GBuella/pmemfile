@@ -36,13 +36,16 @@
 
 #include <errno.h>
 #include <inttypes.h>
+#include <stdio.h>
 
 #include "alloc.h"
 #include "blocks.h"
 #include "callbacks.h"
 #include "compiler_utils.h"
+#include "data.h"
 #include "dir.h"
 #include "hash_map.h"
+#include "file.h"
 #include "inode.h"
 #include "inode_array.h"
 #include "locks.h"
@@ -337,17 +340,53 @@ struct resume_info {
 	PMEMobjpool *old_pop;
 };
 
-static void
-vinode_suspend_cb(uint64_t off, void *vinode, void *arg)
+struct suspend_info {
+	PMEMfilepool *pfp;
+	unsigned count;
+	struct pmemfile_vinode *dst_vinode;
+	struct pmemfile_block_desc *last_block;
+};
+
+static size_t
+print_toid(size_t buf_size, char buf[buf_size],
+		TOID(struct pmemfile_inode) *tinode)
 {
-	vinode_suspend(arg, vinode);
+	uint64_t raw[2];
+	memcpy(raw, tinode, sizeof(raw));
+
+	return (size_t)snprintf(buf, buf_size,
+			"0x%016" PRIx64 ":0x%016" PRIx64 "\n", raw[0], raw[1]);
 }
 
 static void
-inode_resume_cb(uint64_t off, void *vinode, void *arg)
+vinode_suspend_append_special_file(struct pmemfile_vinode *vinode,
+		struct suspend_info *desc)
 {
-	struct resume_info *info = arg;
-	inode_resume(info->pfp, vinode, info->old_pop);
+	char line[SUSPENDED_INODE_LINE_LENGTH];
+	size_t line_len = print_toid(sizeof(line), line, &vinode->tinode);
+
+	struct pmemfile_inode *dst_inode = desc->dst_vinode->inode;
+
+	size_t allocated = dst_inode->allocated_space;
+	allocated += vinode_allocate_interval(desc->pfp, desc->dst_vinode,
+				dst_inode->size, line_len);
+	dst_inode->allocated_space = allocated;
+	vinode_write(desc->pfp, desc->dst_vinode, dst_inode->size,
+		     &desc->last_block, line, line_len);
+	dst_inode->size += line_len;
+}
+
+static void
+vinode_suspend_cb(uint64_t off, void *vinode, void *arg)
+{
+	struct suspend_info *desc = (struct suspend_info *)arg;
+
+	if (vinode == desc->dst_vinode)
+		return;
+
+	vinode_suspend_append_special_file(vinode, desc);
+
+	vinode_suspend(desc->pfp, vinode, desc->count);
 }
 
 static void
@@ -357,24 +396,54 @@ vinode_resume_cb(uint64_t off, void *vinode, void *arg)
 	vinode_resume(info->pfp, vinode, info->old_pop);
 }
 
+static int
+check_paths_on_resume(PMEMfilepool *pfp, PMEMfile *file_at,
+			const char *const *paths)
+{
+	for (const char *const *path = paths; *path != NULL; ++path) {
+		uintptr_t off;
+		PMEMfile *file;
+
+		file = pmemfile_openat(pfp, file_at, *path, PMEMFILE_O_RDONLY);
+		if (file == NULL)
+			return -1;
+		off = (uintptr_t)file->vinode->inode - (uintptr_t)pfp->pop;
+		pmemfile_close(pfp, file);
+
+		if (off != pfp->suspense)
+			return -1;
+	}
+
+	return 0;
+}
+
 /*
  * pmemfile_pool_resume -- notifies pmemfile that pool is now going to be used
  *
  * Can be called only after pmemfile_pool_suspend.
  */
 int
-pmemfile_pool_resume(PMEMfilepool *pfp, const char *pathname)
+pmemfile_pool_resume(PMEMfilepool *pfp, const char *pool_path,
+		unsigned root_index, const char *const *paths, int flags)
 {
+	if (flags != 0) {
+		errno = EINVAL;
+		return -1;
+	}
+
 	PMEMobjpool *new_pop = NULL;
 
 	while (new_pop == NULL) {
-		new_pop = pmemobj_open(pathname, POBJ_LAYOUT_NAME(pmemfile));
+		new_pop = pmemobj_open(pool_path, POBJ_LAYOUT_NAME(pmemfile));
 		if (new_pop == NULL)
 			// XXX
 			os_usleep(1000);
 	}
 
 	int error = 0;
+	PMEMfile *file_at = NULL;
+	PMEMfile *file = NULL;
+
 	PMEMobjpool *old_pop = pfp->pop;
 	struct pmemfile_super *old_super = pfp->super;
 
@@ -389,27 +458,37 @@ pmemfile_pool_resume(PMEMfilepool *pfp, const char *pathname)
 		/* allocation classes will not be used - ignore error */
 	}
 
+	file_at = pmemfile_open_root(pfp, root_index, 0);
+	if (file_at == NULL)
+		goto err;
+
+	if (check_paths_on_resume(pfp, file_at, paths) != 0)
+		goto err;
+
 	struct resume_info arg = {pfp, old_pop};
-
-	TX_BEGIN_CB(pfp->pop, cb_queue, pfp) {
-		hash_map_traverse(pfp->inode_map, inode_resume_cb, &arg);
-	} TX_ONABORT {
-		error = -1;
-	} TX_END
-
-	if (error) {
-		int oerrno = errno;
-		pmemobj_close(new_pop);
-		errno = oerrno;
-
-		pfp->pop = old_pop;
-		pfp->super = old_super;
-		return -1;
-	}
 
 	hash_map_traverse(pfp->inode_map, vinode_resume_cb, &arg);
 
+	for (const char *const *path = paths; *path != NULL; ++path)
+		pmemfile_unlinkat(pfp, file_at, *path, 0);
+
+	pmemfile_close(pfp, file_at);
+
 	return 0;
+
+err:
+	if (file != NULL)
+		pmemfile_close(pfp, file);
+	if (file_at != NULL)
+		pmemfile_close(pfp, file_at);
+
+	int oerrno = errno;
+	pmemobj_close(new_pop);
+	errno = oerrno;
+
+	pfp->pop = old_pop;
+	pfp->super = old_super;
+	return -1;
 }
 
 /*
@@ -421,19 +500,99 @@ pmemfile_pool_resume(PMEMfilepool *pfp, const char *pathname)
  * not being safe)!
  */
 int
-pmemfile_pool_suspend(PMEMfilepool *pfp)
+pmemfile_pool_suspend(PMEMfilepool *pfp, unsigned root_index,
+			const char *const *paths, int flags)
 {
+	if (flags != 0 || paths == NULL || paths[0] == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	struct suspend_info sinfo = {.pfp = pfp, };
+	sinfo.count = 0;
+
+	while (paths[sinfo.count] != NULL) {
+		if (paths[sinfo.count][0] == '\0') {
+			errno = EINVAL;
+			return -1;
+		}
+
+		sinfo.count++;
+	}
+
 	int error = 0;
+	PMEMfile *file_at = NULL;
+	PMEMfile *file = NULL;
+
+	file_at = pmemfile_open_root(pfp, root_index, 0);
+	if (file_at == NULL)
+		goto err;
+
+	file = pmemfile_openat(pfp, file_at, paths[0],
+			PMEMFILE_O_CREAT | PMEMFILE_O_EXCL | PMEMFILE_O_RDWR,
+			0200);
+
+	if (file == NULL)
+		goto err;
+
+	sinfo.dst_vinode = file->vinode;
+
+	unsigned link_count = 1;
+	for (unsigned i = 1; i < sinfo.count; ++i) {
+		if (pmemfile_linkat(pfp, file_at, paths[0],
+					file_at, paths[i], 0) != 0)
+			goto err;
+	}
 
 	TX_BEGIN_CB(pfp->pop, cb_queue, pfp) {
-		hash_map_traverse(pfp->inode_map, vinode_suspend_cb, pfp);
+		/*
+		 * Set the flag inidicating a special file in the transaction.
+		 * If the transaction fails, and power goes out before removing
+		 * the file, then it just stays there as a regular (empty) file,
+		 * not cousing a lot of trouble.
+		 */
+		TX_ADD_DIRECT(&sinfo.dst_vinode->inode->flags);
+		sinfo.dst_vinode->inode->flags |= PMEMFILE_I_SUSPENDED_REF;
+
+		/*
+		 * These two fields are updated with each entry written to the
+		 * special file.
+		 */
+		TX_ADD_DIRECT(&sinfo.dst_vinode->inode->allocated_space);
+		TX_ADD_DIRECT(&sinfo.dst_vinode->inode->size);
+
+		hash_map_traverse(pfp->inode_map, vinode_suspend_cb, &sinfo);
 	} TX_ONABORT {
 		error = -1;
 	} TX_END
 
 	if (error)
-		return -1;
+		goto err;
 
+	pfp->suspense = (uintptr_t)file->vinode->inode - (uintptr_t)pfp->pop;
+
+	pmemfile_close(pfp, file_at);
+	pmemfile_close(pfp, file);
 	pmemobj_close(pfp->pop);
 	return 0;
+
+err:
+	if (file != NULL)
+		pmemfile_close(pfp, file);
+
+	for (unsigned i = 0; i < link_count; ++i) {
+		/*
+		 * If something went wrong, the files are unlinked here. It is
+		 * important that they should not have the relevant internal
+		 * flag set, as pmemfile_unlink would attempt to decrement
+		 * suspended reference counters.
+		 * They must still be actual regular files at this point.
+		 */
+		pmemfile_unlinkat(pfp, file_at, paths[i], 0);
+	}
+
+	if (file_at != NULL)
+		pmemfile_close(pfp, file_at);
+
+	return -1;
 }
